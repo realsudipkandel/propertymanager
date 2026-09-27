@@ -1,0 +1,34 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DB_USER:?set DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:?set DB_NAME}
+    expose:
+      - "5432"
+    volumes:
+      - mira_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-mira}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
+      AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET}
+      BANK_ENCRYPTION_KEY: ${BANK_ENCRYPTION_KEY:?set BANK_ENCRYPTION_KEY}
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-director@miraproperties.example}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?set SEED_ADMIN_PASSWORD}
+      SEED_ADMIN_NAME: ${SEED_ADMIN_NAME:-Mira Director}
+
+volumes:
+  mira_pg:

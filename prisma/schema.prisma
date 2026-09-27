@@ -1,0 +1,912 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  OWNER
+  ACCOUNTANT
+  PROPERTY_MANAGER
+  CLEANER
+  VIEWER
+}
+
+enum BookingPlatform {
+  AIRBNB
+  BOOKING_COM
+  VRBO
+  EXPEDIA
+  HOTELS_COM
+  AGODA
+  DIRECT_WEBSITE
+  PHONE_BOOKING
+  CORPORATE_CLIENT
+  TRAVEL_AGENT
+  OTHER
+}
+
+enum BookingStatus {
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+}
+
+enum ReconciliationStatus {
+  UNMATCHED
+  PARTIALLY_MATCHED
+  MATCHED
+  RECONCILED
+}
+
+enum TaxClassification {
+  ALLOWABLE
+  DISALLOWABLE
+  PARTIALLY_ALLOWABLE
+  CAPITAL
+  FINANCE_COST
+  UNKNOWN
+  ACCOUNTANT_REVIEW
+}
+
+enum VatTreatment {
+  STANDARD
+  REDUCED
+  ZERO
+  EXEMPT
+  OUTSIDE_SCOPE
+  REVERSE_CHARGE
+  UNKNOWN
+}
+
+enum VatRecoverable {
+  YES
+  NO
+  PARTIAL
+  UNKNOWN
+}
+
+enum ExpenseNature {
+  REPAIR
+  MAINTENANCE
+  IMPROVEMENT
+  CAPITAL_EXPENDITURE
+  UNKNOWN
+  ACCOUNTANT_REVIEW
+}
+
+enum AccountingClassification {
+  REVENUE_EXPENSE
+  REPLACEMENT_DOMESTIC_ITEM
+  CAPITAL_ASSET
+  UNKNOWN
+  ACCOUNTANT_REVIEW
+}
+
+enum CostBehaviour {
+  VARIABLE
+  FIXED
+  COMPANY
+  NONE
+}
+
+enum PaymentMethod {
+  BANK_TRANSFER
+  CARD
+  CASH
+  DIRECT_DEBIT
+  STRIPE
+  PAYPAL
+  PLATFORM_PAYOUT
+  OTHER
+}
+
+enum PaymentDirection {
+  RECEIVED
+  MADE
+}
+
+enum BankDirection {
+  CREDIT
+  DEBIT
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  VOID
+}
+
+enum SupplierBillStatus {
+  DRAFT
+  DUE
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  DISPUTED
+  VOID
+}
+
+enum DepositStatus {
+  RECEIVED
+  HELD
+  RETURNED
+  PARTIALLY_RETAINED
+  RETAINED
+}
+
+enum RefundReason {
+  GUEST_CANCELLATION
+  COMPLAINT
+  CLEANING_ISSUE
+  PROPERTY_ISSUE
+  HOST_CANCELLATION
+  DUPLICATE_PAYMENT
+  DAMAGE
+  GOODWILL
+  OTHER
+}
+
+enum RecurrenceFrequency {
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+  ANNUALLY
+  CUSTOM
+}
+
+enum DocumentKind {
+  CUSTOMER_INVOICE
+  SUPPLIER_INVOICE
+  RECEIPT
+  CONTRACT
+  UTILITY_BILL
+  BANK_STATEMENT
+  INSURANCE
+  LICENCE
+  COMPLIANCE_CERTIFICATE
+  LEASE
+  AIRBNB_STATEMENT
+  BOOKING_COM_STATEMENT
+  TAX_DOCUMENT
+  ACCOUNTANT_DOCUMENT
+  OTHER
+}
+
+enum CategoryGroup {
+  INCOME
+  EXPENSE
+}
+
+model Tenant {
+  id        String    @id @default(uuid())
+  name      String
+  createdAt DateTime  @default(now())
+  companies Company[]
+
+  @@map("tenants")
+}
+
+model Company {
+  id                      String   @id @default(uuid())
+  tenantId                String
+  tenant                  Tenant   @relation(fields: [tenantId], references: [id])
+  legalName               String
+  tradingName             String
+  companyNumber           String?
+  vatRegistered           Boolean  @default(false)
+  vatNumber               String?
+  addressLine1            String
+  city                    String
+  postcode                String
+  email                   String
+  phone                   String?
+  financialYearStartMonth Int
+  financialYearStartDay   Int
+  currency                String   @default("GBP")
+  documentRetentionYears  Int      @default(7)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  users              User[]
+  properties         Property[]
+  customers          Customer[]
+  suppliers          Supplier[]
+  incomeCategories   IncomeCategory[]
+  expenseCategories  ExpenseCategory[]
+  bookings           Booking[]
+  incomes            Income[]
+  expenses           Expense[]
+  invoices           Invoice[]
+  supplierBills      SupplierBill[]
+  payments           Payment[]
+  bankAccounts       BankAccount[]
+  payouts            Payout[]
+  refunds            Refund[]
+  deposits           Deposit[]
+  documents          Document[]
+  recurringExpenses  RecurringExpense[]
+  taxSettings        TaxSetting[]
+  vatRates           VatRate[]
+  budgets            Budget[]
+  notifications      Notification[]
+  auditLogs          AuditLog[]
+  assets             Asset[]
+
+  @@index([tenantId])
+  @@map("companies")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  tenantId     String
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id])
+  email        String   @unique
+  name         String
+  passwordHash String
+  role         UserRole
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([tenantId, companyId])
+  @@map("users")
+}
+
+model Property {
+  id        String   @id @default(uuid())
+  tenantId  String
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id])
+  name      String
+  address   String
+  city      String
+  postcode  String
+  bedrooms  Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  contracts  PropertyContract[]
+  bookings   Booking[]
+  incomes    Income[]
+  expenses   Expense[]
+  documents  Document[]
+  budgets    Budget[]
+  assets     Asset[]
+  deposits   Deposit[]
+  refunds    Refund[]
+
+  @@index([tenantId, companyId])
+  @@map("properties")
+}
+
+model PropertyContract {
+  id              String    @id @default(uuid())
+  tenantId        String
+  companyId       String
+  propertyId      String
+  property        Property  @relation(fields: [propertyId], references: [id])
+  supplierId      String
+  supplier        Supplier  @relation(fields: [supplierId], references: [id])
+  monthlyRentPence Int
+  depositPence    Int
+  paymentDay      Int
+  leaseStart      DateTime  @db.Date
+  leaseEnd        DateTime  @db.Date
+  rentReviewOn    DateTime? @db.Date
+  createdAt       DateTime  @default(now())
+
+  @@index([tenantId, companyId])
+  @@map("property_contracts")
+}
+
+model Customer {
+  id        String   @id @default(uuid())
+  tenantId  String
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id])
+  name      String
+  email     String?
+  phone     String?
+  companyName String?
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bookings Booking[]
+  invoices Invoice[]
+  incomes  Income[]
+  refunds  Refund[]
+  deposits Deposit[]
+
+  @@index([tenantId, companyId])
+  @@map("customers")
+}
+
+model Supplier {
+  id            String   @id @default(uuid())
+  tenantId      String
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id])
+  name          String
+  companyName   String?
+  email         String?
+  phone         String?
+  address       String?
+  companyNumber String?
+  vatNumber     String?
+  category      String
+  paymentTerms  String?
+  notes         String?
+  bankCipher    String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  contracts         PropertyContract[]
+  expenses          Expense[]
+  bills             SupplierBill[]
+  recurringExpenses RecurringExpense[]
+
+  @@index([tenantId, companyId])
+  @@map("suppliers")
+}
+
+model IncomeCategory {
+  id         String         @id @default(uuid())
+  tenantId   String
+  companyId  String
+  company    Company        @relation(fields: [companyId], references: [id])
+  parentId   String?
+  parent     IncomeCategory? @relation("IncomeTree", fields: [parentId], references: [id])
+  children   IncomeCategory[] @relation("IncomeTree")
+  code       String
+  name       String
+  createdAt  DateTime       @default(now())
+  incomes    Income[]
+
+  @@unique([companyId, code])
+  @@index([tenantId, companyId])
+  @@map("income_categories")
+}
+
+model ExpenseCategory {
+  id                         String          @id @default(uuid())
+  tenantId                   String
+  companyId                  String
+  company                    Company         @relation(fields: [companyId], references: [id])
+  parentId                   String?
+  parent                     ExpenseCategory? @relation("ExpenseTree", fields: [parentId], references: [id])
+  children                   ExpenseCategory[] @relation("ExpenseTree")
+  code                       String
+  name                       String
+  costBehaviour              CostBehaviour
+  defaultTaxClassification   TaxClassification
+  defaultExpenseNature       ExpenseNature?
+  defaultAccountingClass     AccountingClassification?
+  createdAt                  DateTime        @default(now())
+  expenses                   Expense[]       @relation("ExpenseCategory")
+  subExpenses                Expense[]       @relation("ExpenseSubcategory")
+  recurringExpenses          RecurringExpense[]
+
+  @@unique([companyId, code])
+  @@index([tenantId, companyId])
+  @@map("expense_categories")
+}
+
+model Booking {
+  id                     String               @id @default(uuid())
+  tenantId               String
+  companyId              String
+  company                Company              @relation(fields: [companyId], references: [id])
+  propertyId             String
+  property               Property             @relation(fields: [propertyId], references: [id])
+  customerId             String
+  customer               Customer             @relation(fields: [customerId], references: [id])
+  reference              String
+  platform               BookingPlatform
+  externalBookingId      String
+  status                 BookingStatus
+  checkInDate            DateTime             @db.Date
+  checkOutDate           DateTime             @db.Date
+  numberOfNights         Int
+  numberOfGuests         Int
+  accommodationRevenue   Decimal              @db.Decimal(14, 2)
+  cleaningRevenue        Decimal              @db.Decimal(14, 2)
+  extraGuestRevenue      Decimal              @db.Decimal(14, 2)
+  parkingRevenue         Decimal              @db.Decimal(14, 2)
+  otherRevenue           Decimal              @db.Decimal(14, 2)
+  grossRevenue           Decimal              @db.Decimal(14, 2)
+  platformCommission     Decimal              @db.Decimal(14, 2)
+  paymentProcessingFee   Decimal              @db.Decimal(14, 2)
+  refunds                Decimal              @db.Decimal(14, 2)
+  adjustments            Decimal              @db.Decimal(14, 2)
+  netPayout              Decimal              @db.Decimal(14, 2)
+  vatAmount              Decimal              @db.Decimal(14, 2)
+  currency               String               @default("GBP")
+  payoutDate             DateTime?            @db.Date
+  reconciliationStatus   ReconciliationStatus @default(UNMATCHED)
+  notes                  String?
+  createdById            String
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+
+  incomes    Income[]
+  expenses   Expense[]
+  refundsRel Refund[]
+  deposits   Deposit[]
+  payoutLinks PayoutBooking[]
+  documents  Document[]
+
+  @@unique([companyId, reference])
+  @@unique([companyId, platform, externalBookingId])
+  @@index([tenantId, companyId])
+  @@index([propertyId])
+  @@map("bookings")
+}
+
+model Income {
+  id              String           @id @default(uuid())
+  tenantId        String
+  companyId       String
+  company         Company          @relation(fields: [companyId], references: [id])
+  propertyId      String?
+  property        Property?        @relation(fields: [propertyId], references: [id])
+  bookingId       String?
+  booking         Booking?         @relation(fields: [bookingId], references: [id])
+  customerId      String?
+  customer        Customer?        @relation(fields: [customerId], references: [id])
+  categoryId      String
+  category        IncomeCategory   @relation(fields: [categoryId], references: [id])
+  channel         BookingPlatform?
+  grossAmount     Decimal          @db.Decimal(14, 2)
+  vatAmount       Decimal          @db.Decimal(14, 2)
+  netAmount       Decimal          @db.Decimal(14, 2)
+  currency        String           @default("GBP")
+  transactionDate DateTime         @db.Date
+  serviceDate     DateTime         @db.Date
+  paymentDate     DateTime?        @db.Date
+  paymentStatus   InvoiceStatus    @default(ISSUED)
+  notes           String?
+  createdById     String
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@index([tenantId, companyId, serviceDate])
+  @@index([bookingId])
+  @@map("income")
+}
+
+model Expense {
+  id                    String                    @id @default(uuid())
+  tenantId              String
+  companyId             String
+  company               Company                   @relation(fields: [companyId], references: [id])
+  propertyId            String?
+  property              Property?                 @relation(fields: [propertyId], references: [id])
+  bookingId             String?
+  booking               Booking?                  @relation(fields: [bookingId], references: [id])
+  supplierId            String?
+  supplier              Supplier?                 @relation(fields: [supplierId], references: [id])
+  categoryId            String
+  category              ExpenseCategory           @relation("ExpenseCategory", fields: [categoryId], references: [id])
+  subcategoryId         String?
+  subcategory           ExpenseCategory?          @relation("ExpenseSubcategory", fields: [subcategoryId], references: [id])
+  reference             String
+  description           String
+  invoiceNumber         String?
+  transactionDate       DateTime                  @db.Date
+  paymentDate           DateTime?                 @db.Date
+  netAmount             Decimal                   @db.Decimal(14, 2)
+  vatAmount             Decimal                   @db.Decimal(14, 2)
+  grossAmount           Decimal                   @db.Decimal(14, 2)
+  currency              String                    @default("GBP")
+  paymentMethod         PaymentMethod
+  taxClassification     TaxClassification
+  vatTreatment          VatTreatment
+  vatRecoverable        VatRecoverable
+  expenseNature         ExpenseNature?
+  accountingClass       AccountingClassification?
+  isCapitalExpense      Boolean                   @default(false)
+  businessPercentage    Decimal                   @db.Decimal(5, 2)
+  invoiceUrl            String?
+  notes                 String?
+  bankTransactionId     String?
+  bankTransaction       BankTransaction?          @relation(fields: [bankTransactionId], references: [id])
+  recurringExpenseId    String?
+  recurringExpense      RecurringExpense?         @relation(fields: [recurringExpenseId], references: [id])
+  createdById           String
+  createdAt             DateTime                  @default(now())
+  updatedAt             DateTime                  @updatedAt
+
+  payments  Payment[]
+  documents Document[]
+
+  @@unique([companyId, reference])
+  @@index([tenantId, companyId, transactionDate])
+  @@index([propertyId])
+  @@index([bookingId])
+  @@map("expenses")
+}
+
+model Invoice {
+  id            String        @id @default(uuid())
+  tenantId      String
+  companyId     String
+  company       Company       @relation(fields: [companyId], references: [id])
+  customerId    String
+  customer      Customer      @relation(fields: [customerId], references: [id])
+  number        String
+  status        InvoiceStatus
+  issueDate     DateTime      @db.Date
+  dueDate       DateTime      @db.Date
+  currency      String        @default("GBP")
+  netAmount     Decimal       @db.Decimal(14, 2)
+  vatAmount     Decimal       @db.Decimal(14, 2)
+  grossAmount   Decimal       @db.Decimal(14, 2)
+  notes         String?
+  createdById   String
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  items    InvoiceItem[]
+  payments Payment[]
+
+  @@unique([companyId, number])
+  @@index([tenantId, companyId])
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id          String       @id @default(uuid())
+  invoiceId   String
+  invoice     Invoice      @relation(fields: [invoiceId], references: [id])
+  description String
+  quantity    Decimal      @db.Decimal(10, 2)
+  unitAmount  Decimal      @db.Decimal(14, 2)
+  vatRateBps  Int
+  netAmount   Decimal      @db.Decimal(14, 2)
+  vatAmount   Decimal      @db.Decimal(14, 2)
+  grossAmount Decimal      @db.Decimal(14, 2)
+
+  @@index([invoiceId])
+  @@map("invoice_items")
+}
+
+model SupplierBill {
+  id            String             @id @default(uuid())
+  tenantId      String
+  companyId     String
+  company       Company            @relation(fields: [companyId], references: [id])
+  supplierId    String
+  supplier      Supplier           @relation(fields: [supplierId], references: [id])
+  propertyId    String?
+  number        String
+  status        SupplierBillStatus
+  issueDate     DateTime           @db.Date
+  dueDate       DateTime           @db.Date
+  currency      String             @default("GBP")
+  netAmount     Decimal            @db.Decimal(14, 2)
+  vatAmount     Decimal            @db.Decimal(14, 2)
+  grossAmount   Decimal            @db.Decimal(14, 2)
+  notes         String?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  items    SupplierBillItem[]
+  payments Payment[]
+
+  @@unique([companyId, number])
+  @@index([tenantId, companyId])
+  @@map("supplier_bills")
+}
+
+model SupplierBillItem {
+  id          String       @id @default(uuid())
+  billId      String
+  bill        SupplierBill @relation(fields: [billId], references: [id])
+  description String
+  netAmount   Decimal      @db.Decimal(14, 2)
+  vatAmount   Decimal      @db.Decimal(14, 2)
+  grossAmount Decimal      @db.Decimal(14, 2)
+
+  @@index([billId])
+  @@map("supplier_bill_items")
+}
+
+model Payment {
+  id             String           @id @default(uuid())
+  tenantId       String
+  companyId      String
+  company        Company          @relation(fields: [companyId], references: [id])
+  direction      PaymentDirection
+  method         PaymentMethod
+  amount         Decimal          @db.Decimal(14, 2)
+  currency       String           @default("GBP")
+  paidOn         DateTime         @db.Date
+  reference      String
+  invoiceId      String?
+  invoice        Invoice?         @relation(fields: [invoiceId], references: [id])
+  supplierBillId String?
+  supplierBill   SupplierBill?    @relation(fields: [supplierBillId], references: [id])
+  expenseId      String?
+  expense        Expense?         @relation(fields: [expenseId], references: [id])
+  notes          String?
+  createdById    String
+  createdAt      DateTime         @default(now())
+
+  @@index([tenantId, companyId])
+  @@map("payments")
+}
+
+model BankAccount {
+  id                   String   @id @default(uuid())
+  tenantId             String
+  companyId            String
+  company              Company  @relation(fields: [companyId], references: [id])
+  bankName             String
+  accountName          String
+  accountNumberCipher  String
+  sortCodeCipher       String
+  ibanCipher           String?
+  accountNumberLast4   String
+  openingBalance       Decimal  @db.Decimal(14, 2)
+  createdAt            DateTime @default(now())
+
+  transactions BankTransaction[]
+
+  @@index([tenantId, companyId])
+  @@map("bank_accounts")
+}
+
+model BankTransaction {
+  id                   String               @id @default(uuid())
+  tenantId             String
+  companyId            String
+  bankAccountId        String
+  bankAccount          BankAccount          @relation(fields: [bankAccountId], references: [id])
+  occurredOn           DateTime             @db.Date
+  description          String
+  amount               Decimal              @db.Decimal(14, 2)
+  direction            BankDirection
+  reference            String?
+  reconciliationStatus ReconciliationStatus @default(UNMATCHED)
+  payoutId             String?
+  payout               Payout?              @relation(fields: [payoutId], references: [id])
+  createdAt            DateTime             @default(now())
+
+  expenses Expense[]
+
+  @@index([tenantId, companyId, occurredOn])
+  @@map("bank_transactions")
+}
+
+model Payout {
+  id                   String               @id @default(uuid())
+  tenantId             String
+  companyId            String
+  company              Company              @relation(fields: [companyId], references: [id])
+  platform             BookingPlatform
+  reference            String
+  paidOn               DateTime             @db.Date
+  amount               Decimal              @db.Decimal(14, 2)
+  reconciliationStatus ReconciliationStatus @default(UNMATCHED)
+  createdAt            DateTime             @default(now())
+
+  allocations  PayoutBooking[]
+  transactions BankTransaction[]
+
+  @@unique([companyId, reference])
+  @@index([tenantId, companyId])
+  @@map("payouts")
+}
+
+model PayoutBooking {
+  id        String  @id @default(uuid())
+  payoutId  String
+  payout    Payout  @relation(fields: [payoutId], references: [id])
+  bookingId String
+  booking   Booking @relation(fields: [bookingId], references: [id])
+  amount    Decimal @db.Decimal(14, 2)
+
+  @@unique([payoutId, bookingId])
+  @@map("payout_bookings")
+}
+
+model Refund {
+  id         String       @id @default(uuid())
+  tenantId   String
+  companyId  String
+  company    Company      @relation(fields: [companyId], references: [id])
+  bookingId  String
+  booking    Booking      @relation(fields: [bookingId], references: [id])
+  customerId String
+  customer   Customer     @relation(fields: [customerId], references: [id])
+  propertyId String
+  property   Property     @relation(fields: [propertyId], references: [id])
+  reference  String
+  amount     Decimal      @db.Decimal(14, 2)
+  reason     RefundReason
+  refundedOn DateTime     @db.Date
+  method     PaymentMethod
+  platformReference String?
+  createdAt  DateTime     @default(now())
+
+  @@index([tenantId, companyId])
+  @@map("refunds")
+}
+
+model Deposit {
+  id           String        @id @default(uuid())
+  tenantId     String
+  companyId    String
+  company      Company       @relation(fields: [companyId], references: [id])
+  bookingId    String?
+  booking      Booking?      @relation(fields: [bookingId], references: [id])
+  customerId   String
+  customer     Customer      @relation(fields: [customerId], references: [id])
+  propertyId   String
+  property     Property      @relation(fields: [propertyId], references: [id])
+  reference    String
+  amount       Decimal       @db.Decimal(14, 2)
+  retained     Decimal       @db.Decimal(14, 2)
+  status       DepositStatus
+  receivedOn   DateTime      @db.Date
+  createdAt    DateTime      @default(now())
+
+  @@index([tenantId, companyId])
+  @@map("deposits")
+}
+
+model Document {
+  id          String       @id @default(uuid())
+  tenantId    String
+  companyId   String
+  company     Company      @relation(fields: [companyId], references: [id])
+  propertyId  String?
+  property    Property?    @relation(fields: [propertyId], references: [id])
+  bookingId   String?
+  booking     Booking?     @relation(fields: [bookingId], references: [id])
+  expenseId   String?
+  expense     Expense?     @relation(fields: [expenseId], references: [id])
+  kind        DocumentKind
+  title       String
+  storageKey  String
+  mimeType    String
+  byteSize    Int
+  expiresOn   DateTime?    @db.Date
+  createdById String
+  createdAt   DateTime     @default(now())
+
+  @@index([tenantId, companyId])
+  @@map("documents")
+}
+
+model RecurringExpense {
+  id           String              @id @default(uuid())
+  tenantId     String
+  companyId    String
+  company      Company             @relation(fields: [companyId], references: [id])
+  propertyId   String?
+  supplierId   String?
+  supplier     Supplier?           @relation(fields: [supplierId], references: [id])
+  categoryId   String
+  category     ExpenseCategory     @relation(fields: [categoryId], references: [id])
+  name         String
+  amount       Decimal             @db.Decimal(14, 2)
+  frequency    RecurrenceFrequency
+  nextDueOn    DateTime            @db.Date
+  renewalOn    DateTime?           @db.Date
+  isActive     Boolean             @default(true)
+  createdAt    DateTime            @default(now())
+
+  expenses Expense[]
+
+  @@index([tenantId, companyId])
+  @@map("recurring_expenses")
+}
+
+model TaxSetting {
+  id             String    @id @default(uuid())
+  tenantId       String
+  companyId      String
+  company        Company   @relation(fields: [companyId], references: [id])
+  name           String
+  thresholdAmount Decimal  @db.Decimal(14, 2)
+  effectiveFrom  DateTime  @db.Date
+  effectiveTo    DateTime? @db.Date
+  scheme         String?
+  period         String?
+  notes          String?
+  createdAt      DateTime  @default(now())
+
+  @@index([tenantId, companyId, effectiveFrom])
+  @@map("tax_settings")
+}
+
+model VatRate {
+  id            String       @id @default(uuid())
+  tenantId      String
+  companyId     String
+  company       Company      @relation(fields: [companyId], references: [id])
+  treatment     VatTreatment
+  name          String
+  rateBps       Int
+  effectiveFrom DateTime     @db.Date
+  effectiveTo   DateTime?    @db.Date
+
+  @@index([tenantId, companyId])
+  @@map("vat_rates")
+}
+
+model Budget {
+  id         String   @id @default(uuid())
+  tenantId   String
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id])
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id])
+  periodStart DateTime @db.Date
+  categoryCode String
+  label      String
+  amount     Decimal  @db.Decimal(14, 2)
+
+  @@index([tenantId, companyId, propertyId])
+  @@map("budgets")
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  tenantId  String
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id])
+  kind      String
+  title     String
+  body      String
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, companyId])
+  @@map("notifications")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  tenantId   String
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id])
+  actorId    String?
+  actorName  String
+  action     String
+  entityType String
+  entityId   String
+  summary    String
+  createdAt  DateTime @default(now())
+
+  @@index([tenantId, companyId, createdAt])
+  @@map("audit_logs")
+}
+
+model Asset {
+  id                     String                   @id @default(uuid())
+  tenantId               String
+  companyId              String
+  company                Company                  @relation(fields: [companyId], references: [id])
+  propertyId             String?
+  property               Property?                @relation(fields: [propertyId], references: [id])
+  name                   String
+  accountingClass        AccountingClassification
+  purchasedOn            DateTime                 @db.Date
+  cost                   Decimal                  @db.Decimal(14, 2)
+  notes                  String?
+  createdAt              DateTime                 @default(now())
+
+  @@index([tenantId, companyId])
+  @@map("assets")
+}
