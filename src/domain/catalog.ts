@@ -45,7 +45,7 @@ function expense(
   parentCode: string,
   costBehaviour: CostBehaviour,
   taxClassification: TaxClassification = TAX_CLASSIFICATION.ALLOWABLE,
-  expenseNature: ExpenseNature | null = EXPENSE_NATURE.MAINTENANCE,
+  expenseNature: ExpenseNature | null = null,
   accountingClassification: AccountingClassification | null = ACCOUNTING_CLASSIFICATION.REVENUE_EXPENSE,
 ): CatalogItem {
   return {

@@ -139,3 +139,8 @@ export const DOCUMENT_LABEL: Record<DocumentKind, string> = {
   [DOCUMENT_KIND.ACCOUNTANT_DOCUMENT]: "Accountant document",
   [DOCUMENT_KIND.OTHER]: "Other",
 };
+
+export function countLabel(count: number, singular: string, plural: string): string {
+  const word = count === 1 ? singular : plural;
+  return `${count} ${word}`;
+}

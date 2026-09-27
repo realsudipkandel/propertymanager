@@ -167,17 +167,17 @@ export function companyFinancialYearContaining(
   };
 }
 
+const SHORT_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+
 export function formatDisplayDate(isoDate: IsoDate): string {
   const parsed = parseIsoDate(isoDate);
   if (!parsed) {
     throw new DomainError("Invalid display date.");
   }
-  return new Intl.DateTimeFormat("en-GB", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-    timeZone: "UTC",
-  }).format(parsed);
+  const day = parsed.getUTCDate();
+  const month = SHORT_MONTHS[parsed.getUTCMonth()];
+  const year = parsed.getUTCFullYear();
+  return `${day} ${month} ${year}`;
 }
 
 export function daysInPeriod(period: DatePeriod): number {

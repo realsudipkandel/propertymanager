@@ -180,6 +180,20 @@ export type ChannelRow = {
   bookings: number;
 };
 
+export function summariseCash(input: {
+  openingPence: number;
+  creditsPence: number;
+  debitsPence: number;
+}): { cashInPence: number; cashOutPence: number; netPence: number; closingPence: number } {
+  const netPence = input.creditsPence - input.debitsPence;
+  return {
+    cashInPence: input.creditsPence,
+    cashOutPence: input.debitsPence,
+    netPence,
+    closingPence: input.openingPence + netPence,
+  };
+}
+
 export function revenueByChannel(
   bookings: Array<{ channel: string; grossRevenuePence: number; platformCostsPence: number }>,
 ): ChannelRow[] {

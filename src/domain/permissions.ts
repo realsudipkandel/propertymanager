@@ -35,31 +35,9 @@ export function canViewOperations(role: UserRole): boolean {
   return OPERATIONS_ROLES.includes(role) || role === USER_ROLE.VIEWER;
 }
 
-export function visibleNavHrefs(role: UserRole): string[] {
-  const hrefs = ["/"];
-  if (canViewOperations(role)) {
-    hrefs.push("/bookings", "/properties");
+export function canPostExpense(role: UserRole, parentCategoryCode: string | null): boolean {
+  if (role === USER_ROLE.VIEWER || role === USER_ROLE.CLEANER) {
+    return role === USER_ROLE.CLEANER && parentCategoryCode === "CLEANING";
   }
-  if (canViewFinance(role)) {
-    hrefs.push(
-      "/income",
-      "/expenses",
-      "/invoices",
-      "/payments",
-      "/customers",
-      "/suppliers",
-      "/banking",
-      "/reconciliation",
-      "/documents",
-      "/reports",
-    );
-  }
-  if (canViewTax(role)) {
-    hrefs.push("/tax");
-  }
-  if (role === USER_ROLE.CLEANER) {
-    hrefs.push("/expenses", "/documents");
-  }
-  hrefs.push("/settings");
-  return hrefs;
+  return canMutateFinance(role);
 }

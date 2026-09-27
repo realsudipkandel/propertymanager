@@ -4,11 +4,10 @@ import {
   LEASE_WARNING_DAYS,
   RENEWAL_WARNING_DAYS,
   UTILITY_INCREASE_BPS,
-  VAT_WARNING,
   type AlertKind,
 } from "@/domain/constants";
 import { addDays, daysBetween, type IsoDate } from "@/domain/dates";
-import type { VatWarning } from "@/domain/vat";
+import { VAT_WARNING, type VatWarning } from "@/domain/vat";
 
 export type AlertItem = {
   kind: AlertKind;

@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { bookingContributionPence, calculateBookingFinancials } from "@/domain/accounting";
-import { buildAlerts } from "@/domain/alerts";
-import { CATALOG } from "@/domain/catalog";
+import { postalAddressLines } from "@/domain/address";
+import { isColorTheme, COLOR_THEME } from "@/domain/theme";
+import { assertExternalBookingReference, assertStay, bookingContributionPence, calculateBookingFinancials, rejectEmptyPaymentTarget } from "@/domain/accounting";
+import { buildAlerts, horizonEnd } from "@/domain/alerts";
+import { accommodationIncomeCode, CATALOG, platformFeeCode } from "@/domain/catalog";
 import {
+  BOOKING_PLATFORM,
   COST_BEHAVIOUR,
   DEPOSIT_STATUS,
   FULL_BUSINESS_USE_BPS,
@@ -16,17 +19,22 @@ import { parseBankCsv, serialiseCsv } from "@/domain/csv";
 import {
   calendarMonthContaining,
   companyFinancialYearContaining,
+  formatDisplayDate,
   nightsBetween,
+  trailingMonths,
   ukTaxYearContaining,
 } from "@/domain/dates";
 import { revenueFromDeposit } from "@/domain/deposits";
+import { invalidForm } from "@/domain/form-state";
 import { extensionAllowed, resolveStoragePath } from "@/domain/files";
-import { ageingBucket, applyPayment, invoiceCollectionStatus } from "@/domain/invoices";
+import { ageingBucket, applyPayment, invoiceCollectionStatus, outstandingBalance, supplierBillStatus } from "@/domain/invoices";
 import { calculatePropertyKpis } from "@/domain/kpis";
+import { PLATFORM_LABEL, countLabel } from "@/domain/labels";
 import { applyBasisPoints, formatGbp, formatMargin, marginBasisPoints, parsePoundsToPence } from "@/domain/money";
-import { canConfigureBank, canManageSettings, canMutateFinance, canViewTax } from "@/domain/permissions";
+import { navForRole } from "@/domain/navigation";
+import { canConfigureBank, canManageSettings, canMutateFinance, canPostExpense, canUploadReceipt, canViewFinance, canViewOperations, canViewTax } from "@/domain/permissions";
 import { isExactAllocation, suggestUniqueAmountMatch } from "@/domain/reconciliation";
-import { buildProfitAndLoss, linesForProperty, revenueByChannel, type LedgerLine } from "@/domain/reports";
+import { buildProfitAndLoss, linesForProperty, revenueByChannel, summariseCash, type LedgerLine } from "@/domain/reports";
 import { decryptSecret, encryptSecret, encryptionKeyFromHex, maskAccountNumber } from "@/domain/secrets";
 import { assessVatThreshold, activeTaxConfig, VAT_WARNING } from "@/domain/vat";
 
@@ -353,8 +361,119 @@ describe("invoices, deposits, and reconciliation", () => {
     ).toBe("OVERDUE");
     expect(ageingBucket("2026-09-30", "2026-09-27", 150_000)).toBe("current");
     expect(ageingBucket("2026-08-01", "2026-09-27", 80_000)).toBe("days31to60");
+    expect(ageingBucket("2026-09-10", "2026-09-27", 80_000)).toBe("days1to30");
     expect(ageingBucket("2026-06-01", "2026-09-27", 15_000)).toBe("days61plus");
     expect(ageingBucket("2026-09-01", "2026-09-27", 0)).toBeNull();
+    expect(
+      invoiceCollectionStatus({
+        totalPence: 100_000,
+        paidPence: 40_000,
+        dueOn: "2026-10-01",
+        today: "2026-09-27",
+        isVoid: false,
+        isDraft: false,
+      }),
+    ).toBe("PARTIALLY_PAID");
+    expect(
+      invoiceCollectionStatus({
+        totalPence: 100_000,
+        paidPence: 0,
+        dueOn: "2026-10-01",
+        today: "2026-09-27",
+        isVoid: false,
+        isDraft: false,
+      }),
+    ).toBe("ISSUED");
+    expect(
+      invoiceCollectionStatus({
+        totalPence: 100_000,
+        paidPence: 0,
+        dueOn: "2026-10-01",
+        today: "2026-09-27",
+        isVoid: true,
+        isDraft: false,
+      }),
+    ).toBe("VOID");
+    expect(
+      invoiceCollectionStatus({
+        totalPence: 100_000,
+        paidPence: 0,
+        dueOn: "2026-10-01",
+        today: "2026-09-27",
+        isVoid: false,
+        isDraft: true,
+      }),
+    ).toBe("DRAFT");
+    expect(() => outstandingBalance(-1, 0)).toThrow(/negative/i);
+    expect(supplierBillStatus({
+      totalPence: 45_000,
+      paidPence: 0,
+      dueOn: "2026-09-20",
+      today: "2026-09-27",
+      isVoid: false,
+      isDraft: false,
+      isDisputed: false,
+    })).toBe("OVERDUE");
+    expect(supplierBillStatus({
+      totalPence: 45_000,
+      paidPence: 10_000,
+      dueOn: "2026-10-01",
+      today: "2026-09-27",
+      isVoid: false,
+      isDraft: false,
+      isDisputed: false,
+    })).toBe("PARTIALLY_PAID");
+    expect(supplierBillStatus({
+      totalPence: 45_000,
+      paidPence: 45_000,
+      dueOn: "2026-09-01",
+      today: "2026-09-27",
+      isVoid: false,
+      isDraft: false,
+      isDisputed: false,
+    })).toBe("PAID");
+    expect(supplierBillStatus({
+      totalPence: 45_000,
+      paidPence: 0,
+      dueOn: "2026-10-01",
+      today: "2026-09-27",
+      isVoid: false,
+      isDraft: false,
+      isDisputed: false,
+    })).toBe("DUE");
+    expect(supplierBillStatus({
+      totalPence: 45_000,
+      paidPence: 0,
+      dueOn: "2026-10-01",
+      today: "2026-09-27",
+      isVoid: true,
+      isDraft: false,
+      isDisputed: true,
+    })).toBe("VOID");
+    expect(supplierBillStatus({
+      totalPence: 45_000,
+      paidPence: 0,
+      dueOn: "2026-10-01",
+      today: "2026-09-27",
+      isVoid: false,
+      isDraft: false,
+      isDisputed: true,
+    })).toBe("DISPUTED");
+    expect(supplierBillStatus({
+      totalPence: 45_000,
+      paidPence: 0,
+      dueOn: "2026-10-01",
+      today: "2026-09-27",
+      isVoid: false,
+      isDraft: true,
+      isDisputed: false,
+    })).toBe("DRAFT");
+    expect(assertStay("2026-10-12", "2026-10-15", 2)).toBe(3);
+    expect(() => assertStay("2026-10-12", "2026-10-15", 0)).toThrow(/guest/i);
+    expect(assertExternalBookingReference("  HMABC12345  ")).toBe("HMABC12345");
+    expect(() => assertExternalBookingReference("ab")).toThrow(/reference/i);
+    expect(() => rejectEmptyPaymentTarget({})).toThrow(/highlighted/i);
+    expect(() => rejectEmptyPaymentTarget({ invoiceId: "inv" })).not.toThrow();
   });
 
   it("keeps held deposits out of revenue", () => {
@@ -434,6 +553,46 @@ describe("periods, money, files, and access", () => {
     expect(canViewTax(USER_ROLE.ACCOUNTANT)).toBe(true);
     expect(canMutateFinance(USER_ROLE.VIEWER)).toBe(false);
     expect(canMutateFinance(USER_ROLE.PROPERTY_MANAGER)).toBe(true);
+    expect(canPostExpense(USER_ROLE.CLEANER, "CLEANING")).toBe(true);
+    expect(canPostExpense(USER_ROLE.CLEANER, "PROPERTY_RENT")).toBe(false);
+    expect(canPostExpense(USER_ROLE.VIEWER, "CLEANING")).toBe(false);
+    expect(canViewFinance(USER_ROLE.VIEWER)).toBe(true);
+    expect(canViewFinance(USER_ROLE.CLEANER)).toBe(false);
+    expect(canUploadReceipt(USER_ROLE.CLEANER)).toBe(true);
+    expect(canUploadReceipt(USER_ROLE.VIEWER)).toBe(false);
+    expect(canViewOperations(USER_ROLE.VIEWER)).toBe(true);
+    expect(canViewOperations(USER_ROLE.CLEANER)).toBe(false);
+    expect(invalidForm("Check the highlighted fields.", { amount: "Required" }).fieldErrors.amount).toBe("Required");
+    expect(horizonEnd("2026-09-27", 30)).toBe("2026-10-27");
+    expect(PLATFORM_LABEL.AIRBNB).toBe("Airbnb");
+    expect(countLabel(1, "booking", "bookings")).toBe("1 booking");
+    expect(countLabel(4, "booking", "bookings")).toBe("4 bookings");
+    expect(isColorTheme(COLOR_THEME.LIGHT)).toBe(true);
+    expect(isColorTheme(COLOR_THEME.DARK)).toBe(true);
+    expect(isColorTheme("system")).toBe(false);
+    expect(navForRole(USER_ROLE.OWNER).some((item) => item.href === "/tax")).toBe(true);
+    expect(navForRole(USER_ROLE.CLEANER).some((item) => item.href === "/tax")).toBe(false);
+    expect(accommodationIncomeCode(BOOKING_PLATFORM.AIRBNB)).toBe("AIRBNB_BOOKING");
+    expect(platformFeeCode(BOOKING_PLATFORM.BOOKING_COM)).toBe("BOOKING_COM_COMMISSION");
+    expect(platformFeeCode(BOOKING_PLATFORM.DIRECT_WEBSITE)).toBe("PAYMENT_PROCESSING");
+    expect(formatDisplayDate("2026-09-27")).toBe("27 Sep 2026");
+    expect(postalAddressLines({
+      line1: "43 Foundry House",
+      line2: "Riverview Rental Apartments",
+      line3: "Elmsleigh Road",
+      city: "Staines",
+      postcode: "TW18 4AJ",
+    })).toEqual([
+      "43 Foundry House",
+      "Riverview Rental Apartments",
+      "Elmsleigh Road",
+      "Staines TW18 4AJ",
+    ]);
+    expect(trailingMonths("2026-09-27", 2)).toHaveLength(2);
+    expect(summariseCash({ openingPence: 100, creditsPence: 50, debitsPence: 20 })).toMatchObject({
+      netPence: 30,
+      closingPence: 130,
+    });
   });
 
   it("escapes csv formulas and rejects an invalid bank file wholesale", () => {
@@ -474,6 +633,24 @@ describe("periods, money, files, and access", () => {
       ]),
     );
     expect(alerts.some((alert) => alert.kind === "LEASE_EXPIRING")).toBe(false);
+    const exceeded = buildAlerts({
+      today: "2026-09-27",
+      overdueInvoices: 2,
+      supplierBillsDue: 1,
+      rentDue: 2,
+      unmatchedBankTransactions: 2,
+      unmatchedPayouts: 2,
+      vatWarning: VAT_WARNING.EXCEEDED,
+      certificateExpiries: [],
+      leaseEnds: [{ propertyName: "Heathrow Apartment", endsOn: "2026-10-20" }],
+      renewals: [],
+      insuranceExpiries: [{ name: "Hiscox", expiresOn: "2026-10-10" }],
+      utilityThisMonthPence: 0,
+      utilityPreviousMonthPence: 0,
+    });
+    expect(exceeded.map((alert) => alert.kind)).toEqual(
+      expect.arrayContaining(["VAT_THRESHOLD_EXCEEDED", "SUPPLIER_BILL_DUE", "LEASE_EXPIRING", "INSURANCE_EXPIRING"]),
+    );
   });
 
   it("has a unique code for every catalog row", () => {
