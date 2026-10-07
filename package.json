@@ -3,14 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "dev": "sh scripts/with-secrets.sh npx next dev",
+    "build": "sh scripts/with-secrets.sh npx next build",
+    "start": "sh scripts/with-secrets.sh npx next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --coverage",
     "db:local": "sh scripts/start-local-db.sh",
-    "db:seed": "prisma db seed"
+    "db:seed": "sh scripts/with-secrets.sh npx prisma db seed"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

@@ -16,8 +16,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Mira Properties",
-  description: "Financial source of truth for Mira Properties serviced accommodation.",
+  title: "Property Finance",
+  description: "Financial records for serviced accommodation, kept separate for each organisation.",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

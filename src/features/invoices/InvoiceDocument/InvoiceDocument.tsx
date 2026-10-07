@@ -72,7 +72,7 @@ export type InvoiceDocumentProps = {
   totalPence: number;
   paidPence: number;
   balancePence: number;
-  logoPath: string;
+  logoPath?: string;
 };
 
 function AddressLine({ line }: { line: string }) {
@@ -99,7 +99,7 @@ export function InvoiceDocument(props: InvoiceDocumentProps) {
       <Page size="A4" style={styles.page}>
         <View style={styles.header}>
           <View style={styles.brandBand}>
-            <PdfImage src={props.logoPath} style={styles.logo} />
+            {props.logoPath ? <PdfImage src={props.logoPath} style={styles.logo} /> : <Text style={styles.strong}>{props.company}</Text>}
           </View>
           <View style={styles.titleBlock}>
             <Text style={styles.title}>INVOICE</Text>

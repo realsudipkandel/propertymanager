@@ -2,14 +2,27 @@ import path from "node:path";
 
 import { renderToBuffer } from "@react-pdf/renderer";
 
+import { attachmentDisposition } from "@/domain/files";
+import { canViewFinance } from "@/domain/permissions";
 import { InvoiceDocument } from "@/features/invoices/InvoiceDocument";
 import { getInvoice } from "@/server/queries";
-import { getSession } from "@/server/session";
+import { isSession, requireApiSession } from "@/server/session";
 
-export async function GET(_request: Request, context: { params: Promise<{ id: string }> }): Promise<Response> {
-  const session = await getSession();
-  if (!session) {
-    return new Response("Sign in required.", { status: 401 });
+function brandFilePath(logoUrl: string | null): string | undefined {
+  if (!logoUrl || !logoUrl.startsWith("/brand/") || logoUrl.includes("..")) {
+    return undefined;
+  }
+  return path.join(process.cwd(), "public", logoUrl.slice(1));
+}
+
+export async function GET(request: Request, context: { params: Promise<{ id: string }> }): Promise<Response> {
+  const slug = new URL(request.url).searchParams.get("organization");
+  const session = await requireApiSession(slug);
+  if (!isSession(session)) {
+    return session;
+  }
+  if (!canViewFinance(session.role)) {
+    return new Response("You do not have permission to do that.", { status: 403 });
   }
   const { id } = await context.params;
   const invoice = await getInvoice(session, id);
@@ -37,13 +50,15 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
       totalPence={invoice.totalPence}
       paidPence={invoice.paidPence}
       balancePence={invoice.balancePence}
-      logoPath={path.join(process.cwd(), "public/brand/mira-logo.png")}
+      logoPath={brandFilePath(invoice.logoUrl)}
     />,
   );
   return new Response(new Uint8Array(buffer), {
     headers: {
       "Content-Type": "application/pdf",
-      "Content-Disposition": `attachment; filename="${invoice.number}.pdf"`,
+      "Content-Disposition": attachmentDisposition(`${invoice.number}.pdf`),
+      "X-Content-Type-Options": "nosniff",
+      "Cache-Control": "private, no-store",
     },
   });
 }

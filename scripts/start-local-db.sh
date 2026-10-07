@@ -3,14 +3,22 @@ set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 ENV_FILE="$ROOT/.env"
+SECRETS_FILE="$ROOT/secrets.env"
 
 if [ ! -f "$ENV_FILE" ]; then
-  echo "Missing .env. Copy .env.example and set random credentials." >&2
+  echo "Missing .env. Copy .env.example." >&2
+  exit 1
+fi
+
+if [ ! -f "$SECRETS_FILE" ]; then
+  echo "Missing secrets.env. Copy secrets.env.example and set the passwords and keys there." >&2
   exit 1
 fi
 
 # shellcheck disable=SC1090
 . "$ENV_FILE"
+# shellcheck disable=SC1090
+. "$SECRETS_FILE"
 
 : "${DB_USER:?}"
 : "${DB_PASSWORD:?}"

@@ -9,10 +9,18 @@ datasource db {
 
 enum UserRole {
   OWNER
+  ORGANIZATION_ADMIN
+  FINANCE_MANAGER
   ACCOUNTANT
   PROPERTY_MANAGER
+  OPERATIONS
   CLEANER
   VIEWER
+}
+
+enum MembershipStatus {
+  ACTIVE
+  SUSPENDED
 }
 
 enum BookingPlatform {
@@ -188,17 +196,18 @@ model Tenant {
   id        String    @id @default(uuid())
   name      String
   createdAt DateTime  @default(now())
-  companies Company[]
+  organizations Organization[]
 
   @@map("tenants")
 }
 
-model Company {
+model Organization {
   id                      String   @id @default(uuid())
   tenantId                String
   tenant                  Tenant   @relation(fields: [tenantId], references: [id])
   legalName               String
   tradingName             String
+  slug                    String   @unique
   companyNumber           String?
   vatRegistered           Boolean  @default(false)
   vatNumber               String?
@@ -207,8 +216,12 @@ model Company {
   addressLine3            String?
   city                    String
   postcode                String
+  country                 String   @default("GB")
+  timezone                String   @default("Europe/London")
   email                   String
   phone                   String?
+  website                 String?
+  logoUrl                 String?
   financialYearStartMonth Int
   financialYearStartDay   Int
   currency                String   @default("GBP")
@@ -216,7 +229,8 @@ model Company {
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
 
-  users              User[]
+  memberships        OrganizationMembership[]
+  invitations        Invitation[]
   properties         Property[]
   customers          Customer[]
   suppliers          Supplier[]
@@ -242,31 +256,64 @@ model Company {
   assets             Asset[]
 
   @@index([tenantId])
-  @@map("companies")
+  @@map("organizations")
 }
 
 model User {
   id           String   @id @default(uuid())
-  tenantId     String
-  companyId    String
-  company      Company  @relation(fields: [companyId], references: [id])
   email        String   @unique
   name         String
   passwordHash String
-  role         UserRole
   isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  @@index([tenantId, companyId])
+  memberships OrganizationMembership[]
+
   @@map("users")
+}
+
+model OrganizationMembership {
+  id             String           @id @default(uuid())
+  organizationId String
+  userId         String
+  role           UserRole
+  status         MembershipStatus @default(ACTIVE)
+  invitedById    String?
+  joinedAt       DateTime         @default(now())
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  organization   Organization     @relation(fields: [organizationId], references: [id])
+  user           User             @relation(fields: [userId], references: [id])
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@map("organization_memberships")
+}
+
+model Invitation {
+  id          String    @id @default(uuid())
+  tenantId    String
+  organizationId   String
+  organization     Organization   @relation(fields: [organizationId], references: [id])
+  email       String
+  role        UserRole
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  invitedById String
+  acceptedAt  DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([tenantId, organizationId, email])
+  @@map("invitations")
 }
 
 model Property {
   id        String   @id @default(uuid())
   tenantId  String
-  companyId String
-  company   Company  @relation(fields: [companyId], references: [id])
+  organizationId String
+  organization   Organization  @relation(fields: [organizationId], references: [id])
   name      String
   address   String
   city      String
@@ -285,14 +332,14 @@ model Property {
   deposits   Deposit[]
   refunds    Refund[]
 
-  @@index([tenantId, companyId])
+  @@index([tenantId, organizationId])
   @@map("properties")
 }
 
 model PropertyContract {
   id              String    @id @default(uuid())
   tenantId        String
-  companyId       String
+  organizationId       String
   propertyId      String
   property        Property  @relation(fields: [propertyId], references: [id])
   supplierId      String
@@ -305,15 +352,15 @@ model PropertyContract {
   rentReviewOn    DateTime? @db.Date
   createdAt       DateTime  @default(now())
 
-  @@index([tenantId, companyId])
+  @@index([tenantId, organizationId])
   @@map("property_contracts")
 }
 
 model Customer {
   id        String   @id @default(uuid())
   tenantId  String
-  companyId String
-  company   Company  @relation(fields: [companyId], references: [id])
+  organizationId String
+  organization   Organization  @relation(fields: [organizationId], references: [id])
   name      String
   email     String?
   phone     String?
@@ -328,15 +375,15 @@ model Customer {
   refunds  Refund[]
   deposits Deposit[]
 
-  @@index([tenantId, companyId])
+  @@index([tenantId, organizationId])
   @@map("customers")
 }
 
 model Supplier {
   id            String   @id @default(uuid())
   tenantId      String
-  companyId     String
-  company       Company  @relation(fields: [companyId], references: [id])
+  organizationId     String
+  organization       Organization  @relation(fields: [organizationId], references: [id])
   name          String
   companyName   String?
   email         String?
@@ -356,15 +403,15 @@ model Supplier {
   bills             SupplierBill[]
   recurringExpenses RecurringExpense[]
 
-  @@index([tenantId, companyId])
+  @@index([tenantId, organizationId])
   @@map("suppliers")
 }
 
 model IncomeCategory {
   id         String         @id @default(uuid())
   tenantId   String
-  companyId  String
-  company    Company        @relation(fields: [companyId], references: [id])
+  organizationId  String
+  organization    Organization        @relation(fields: [organizationId], references: [id])
   parentId   String?
   parent     IncomeCategory? @relation("IncomeTree", fields: [parentId], references: [id])
   children   IncomeCategory[] @relation("IncomeTree")
@@ -373,16 +420,16 @@ model IncomeCategory {
   createdAt  DateTime       @default(now())
   incomes    Income[]
 
-  @@unique([companyId, code])
-  @@index([tenantId, companyId])
+  @@unique([organizationId, code])
+  @@index([tenantId, organizationId])
   @@map("income_categories")
 }
 
 model ExpenseCategory {
   id                         String          @id @default(uuid())
   tenantId                   String
-  companyId                  String
-  company                    Company         @relation(fields: [companyId], references: [id])
+  organizationId                  String
+  organization                    Organization         @relation(fields: [organizationId], references: [id])
   parentId                   String?
   parent                     ExpenseCategory? @relation("ExpenseTree", fields: [parentId], references: [id])
   children                   ExpenseCategory[] @relation("ExpenseTree")
@@ -397,16 +444,16 @@ model ExpenseCategory {
   subExpenses                Expense[]       @relation("ExpenseSubcategory")
   recurringExpenses          RecurringExpense[]
 
-  @@unique([companyId, code])
-  @@index([tenantId, companyId])
+  @@unique([organizationId, code])
+  @@index([tenantId, organizationId])
   @@map("expense_categories")
 }
 
 model Booking {
   id                     String               @id @default(uuid())
   tenantId               String
-  companyId              String
-  company                Company              @relation(fields: [companyId], references: [id])
+  organizationId              String
+  organization                Organization              @relation(fields: [organizationId], references: [id])
   propertyId             String
   property               Property             @relation(fields: [propertyId], references: [id])
   customerId             String
@@ -446,9 +493,9 @@ model Booking {
   payoutLinks PayoutBooking[]
   documents  Document[]
 
-  @@unique([companyId, reference])
-  @@unique([companyId, platform, externalBookingId])
-  @@index([tenantId, companyId])
+  @@unique([organizationId, reference])
+  @@unique([organizationId, platform, externalBookingId])
+  @@index([tenantId, organizationId])
   @@index([propertyId])
   @@map("bookings")
 }
@@ -456,8 +503,8 @@ model Booking {
 model Income {
   id              String           @id @default(uuid())
   tenantId        String
-  companyId       String
-  company         Company          @relation(fields: [companyId], references: [id])
+  organizationId       String
+  organization         Organization          @relation(fields: [organizationId], references: [id])
   propertyId      String?
   property        Property?        @relation(fields: [propertyId], references: [id])
   bookingId       String?
@@ -480,7 +527,7 @@ model Income {
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
 
-  @@index([tenantId, companyId, serviceDate])
+  @@index([tenantId, organizationId, serviceDate])
   @@index([bookingId])
   @@map("income")
 }
@@ -488,8 +535,8 @@ model Income {
 model Expense {
   id                    String                    @id @default(uuid())
   tenantId              String
-  companyId             String
-  company               Company                   @relation(fields: [companyId], references: [id])
+  organizationId             String
+  organization               Organization                   @relation(fields: [organizationId], references: [id])
   propertyId            String?
   property              Property?                 @relation(fields: [propertyId], references: [id])
   bookingId             String?
@@ -530,8 +577,8 @@ model Expense {
   payments  Payment[]
   documents Document[]
 
-  @@unique([companyId, reference])
-  @@index([tenantId, companyId, transactionDate])
+  @@unique([organizationId, reference])
+  @@index([tenantId, organizationId, transactionDate])
   @@index([propertyId])
   @@index([bookingId])
   @@map("expenses")
@@ -540,8 +587,8 @@ model Expense {
 model Invoice {
   id            String        @id @default(uuid())
   tenantId      String
-  companyId     String
-  company       Company       @relation(fields: [companyId], references: [id])
+  organizationId     String
+  organization       Organization       @relation(fields: [organizationId], references: [id])
   customerId    String
   customer      Customer      @relation(fields: [customerId], references: [id])
   number        String
@@ -560,8 +607,8 @@ model Invoice {
   items    InvoiceItem[]
   payments Payment[]
 
-  @@unique([companyId, number])
-  @@index([tenantId, companyId])
+  @@unique([organizationId, number])
+  @@index([tenantId, organizationId])
   @@map("invoices")
 }
 
@@ -584,8 +631,8 @@ model InvoiceItem {
 model SupplierBill {
   id            String             @id @default(uuid())
   tenantId      String
-  companyId     String
-  company       Company            @relation(fields: [companyId], references: [id])
+  organizationId     String
+  organization       Organization            @relation(fields: [organizationId], references: [id])
   supplierId    String
   supplier      Supplier           @relation(fields: [supplierId], references: [id])
   propertyId    String?
@@ -604,8 +651,8 @@ model SupplierBill {
   items    SupplierBillItem[]
   payments Payment[]
 
-  @@unique([companyId, number])
-  @@index([tenantId, companyId])
+  @@unique([organizationId, number])
+  @@index([tenantId, organizationId])
   @@map("supplier_bills")
 }
 
@@ -625,8 +672,8 @@ model SupplierBillItem {
 model Payment {
   id             String           @id @default(uuid())
   tenantId       String
-  companyId      String
-  company        Company          @relation(fields: [companyId], references: [id])
+  organizationId      String
+  organization        Organization          @relation(fields: [organizationId], references: [id])
   direction      PaymentDirection
   method         PaymentMethod
   amount         Decimal          @db.Decimal(14, 2)
@@ -643,15 +690,15 @@ model Payment {
   createdById    String
   createdAt      DateTime         @default(now())
 
-  @@index([tenantId, companyId])
+  @@index([tenantId, organizationId])
   @@map("payments")
 }
 
 model BankAccount {
   id                   String   @id @default(uuid())
   tenantId             String
-  companyId            String
-  company              Company  @relation(fields: [companyId], references: [id])
+  organizationId            String
+  organization              Organization  @relation(fields: [organizationId], references: [id])
   bankName             String
   accountName          String
   accountNumberCipher  String
@@ -663,14 +710,14 @@ model BankAccount {
 
   transactions BankTransaction[]
 
-  @@index([tenantId, companyId])
+  @@index([tenantId, organizationId])
   @@map("bank_accounts")
 }
 
 model BankTransaction {
   id                   String               @id @default(uuid())
   tenantId             String
-  companyId            String
+  organizationId            String
   bankAccountId        String
   bankAccount          BankAccount          @relation(fields: [bankAccountId], references: [id])
   occurredOn           DateTime             @db.Date
@@ -685,15 +732,15 @@ model BankTransaction {
 
   expenses Expense[]
 
-  @@index([tenantId, companyId, occurredOn])
+  @@index([tenantId, organizationId, occurredOn])
   @@map("bank_transactions")
 }
 
 model Payout {
   id                   String               @id @default(uuid())
   tenantId             String
-  companyId            String
-  company              Company              @relation(fields: [companyId], references: [id])
+  organizationId            String
+  organization              Organization              @relation(fields: [organizationId], references: [id])
   platform             BookingPlatform
   reference            String
   paidOn               DateTime             @db.Date
@@ -704,8 +751,8 @@ model Payout {
   allocations  PayoutBooking[]
   transactions BankTransaction[]
 
-  @@unique([companyId, reference])
-  @@index([tenantId, companyId])
+  @@unique([organizationId, reference])
+  @@index([tenantId, organizationId])
   @@map("payouts")
 }
 
@@ -724,8 +771,8 @@ model PayoutBooking {
 model Refund {
   id         String       @id @default(uuid())
   tenantId   String
-  companyId  String
-  company    Company      @relation(fields: [companyId], references: [id])
+  organizationId  String
+  organization    Organization      @relation(fields: [organizationId], references: [id])
   bookingId  String
   booking    Booking      @relation(fields: [bookingId], references: [id])
   customerId String
@@ -740,15 +787,15 @@ model Refund {
   platformReference String?
   createdAt  DateTime     @default(now())
 
-  @@index([tenantId, companyId])
+  @@index([tenantId, organizationId])
   @@map("refunds")
 }
 
 model Deposit {
   id           String        @id @default(uuid())
   tenantId     String
-  companyId    String
-  company      Company       @relation(fields: [companyId], references: [id])
+  organizationId    String
+  organization      Organization       @relation(fields: [organizationId], references: [id])
   bookingId    String?
   booking      Booking?      @relation(fields: [bookingId], references: [id])
   customerId   String
@@ -762,15 +809,15 @@ model Deposit {
   receivedOn   DateTime      @db.Date
   createdAt    DateTime      @default(now())
 
-  @@index([tenantId, companyId])
+  @@index([tenantId, organizationId])
   @@map("deposits")
 }
 
 model Document {
   id          String       @id @default(uuid())
   tenantId    String
-  companyId   String
-  company     Company      @relation(fields: [companyId], references: [id])
+  organizationId   String
+  organization     Organization      @relation(fields: [organizationId], references: [id])
   propertyId  String?
   property    Property?    @relation(fields: [propertyId], references: [id])
   bookingId   String?
@@ -786,15 +833,15 @@ model Document {
   createdById String
   createdAt   DateTime     @default(now())
 
-  @@index([tenantId, companyId])
+  @@index([tenantId, organizationId])
   @@map("documents")
 }
 
 model RecurringExpense {
   id           String              @id @default(uuid())
   tenantId     String
-  companyId    String
-  company      Company             @relation(fields: [companyId], references: [id])
+  organizationId    String
+  organization      Organization             @relation(fields: [organizationId], references: [id])
   propertyId   String?
   supplierId   String?
   supplier     Supplier?           @relation(fields: [supplierId], references: [id])
@@ -810,15 +857,15 @@ model RecurringExpense {
 
   expenses Expense[]
 
-  @@index([tenantId, companyId])
+  @@index([tenantId, organizationId])
   @@map("recurring_expenses")
 }
 
 model TaxSetting {
   id             String    @id @default(uuid())
   tenantId       String
-  companyId      String
-  company        Company   @relation(fields: [companyId], references: [id])
+  organizationId      String
+  organization        Organization   @relation(fields: [organizationId], references: [id])
   name           String
   thresholdAmount Decimal  @db.Decimal(14, 2)
   effectiveFrom  DateTime  @db.Date
@@ -828,30 +875,30 @@ model TaxSetting {
   notes          String?
   createdAt      DateTime  @default(now())
 
-  @@index([tenantId, companyId, effectiveFrom])
+  @@index([tenantId, organizationId, effectiveFrom])
   @@map("tax_settings")
 }
 
 model VatRate {
   id            String       @id @default(uuid())
   tenantId      String
-  companyId     String
-  company       Company      @relation(fields: [companyId], references: [id])
+  organizationId     String
+  organization       Organization      @relation(fields: [organizationId], references: [id])
   treatment     VatTreatment
   name          String
   rateBps       Int
   effectiveFrom DateTime     @db.Date
   effectiveTo   DateTime?    @db.Date
 
-  @@index([tenantId, companyId])
+  @@index([tenantId, organizationId])
   @@map("vat_rates")
 }
 
 model Budget {
   id         String   @id @default(uuid())
   tenantId   String
-  companyId  String
-  company    Company  @relation(fields: [companyId], references: [id])
+  organizationId  String
+  organization    Organization  @relation(fields: [organizationId], references: [id])
   propertyId String
   property   Property @relation(fields: [propertyId], references: [id])
   periodStart DateTime @db.Date
@@ -859,30 +906,30 @@ model Budget {
   label      String
   amount     Decimal  @db.Decimal(14, 2)
 
-  @@index([tenantId, companyId, propertyId])
+  @@index([tenantId, organizationId, propertyId])
   @@map("budgets")
 }
 
 model Notification {
   id        String   @id @default(uuid())
   tenantId  String
-  companyId String
-  company   Company  @relation(fields: [companyId], references: [id])
+  organizationId String
+  organization   Organization  @relation(fields: [organizationId], references: [id])
   kind      String
   title     String
   body      String
   isRead    Boolean  @default(false)
   createdAt DateTime @default(now())
 
-  @@index([tenantId, companyId])
+  @@index([tenantId, organizationId])
   @@map("notifications")
 }
 
 model AuditLog {
   id         String   @id @default(uuid())
   tenantId   String
-  companyId  String
-  company    Company  @relation(fields: [companyId], references: [id])
+  organizationId  String
+  organization    Organization  @relation(fields: [organizationId], references: [id])
   actorId    String?
   actorName  String
   action     String
@@ -891,15 +938,15 @@ model AuditLog {
   summary    String
   createdAt  DateTime @default(now())
 
-  @@index([tenantId, companyId, createdAt])
+  @@index([tenantId, organizationId, createdAt])
   @@map("audit_logs")
 }
 
 model Asset {
   id                     String                   @id @default(uuid())
   tenantId               String
-  companyId              String
-  company                Company                  @relation(fields: [companyId], references: [id])
+  organizationId              String
+  organization                Organization                  @relation(fields: [organizationId], references: [id])
   propertyId             String?
   property               Property?                @relation(fields: [propertyId], references: [id])
   name                   String
@@ -909,6 +956,6 @@ model Asset {
   notes                  String?
   createdAt              DateTime                 @default(now())
 
-  @@index([tenantId, companyId])
+  @@index([tenantId, organizationId])
   @@map("assets")
 }

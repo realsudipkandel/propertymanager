@@ -17,7 +17,7 @@ export async function appendAuditLog(
   await client.auditLog.create({
     data: {
       tenantId: session.tenantId,
-      companyId: session.companyId,
+      organizationId: session.organizationId,
       actorId: session.userId,
       actorName: session.name,
       action: entry.action,

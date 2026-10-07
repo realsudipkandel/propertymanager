@@ -6,6 +6,8 @@ import path from "node:path";
 
 import { Prisma } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import { revalidatePath } from "next/cache";
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 
 import {
@@ -22,24 +24,37 @@ import {
   INCOME_CODE,
   MAX_UPLOAD_BYTES,
   MESSAGE,
+  MIN_PASSWORD_LENGTH,
   PAYMENT_METHOD,
+  USER_ROLE,
   type BookingPlatform,
   type PaymentMethod,
 } from "@/domain/constants";
 import { assertExternalBookingReference, assertStay, calculateBookingFinancials } from "@/domain/accounting";
 import { assertIsoDate, dateToIso } from "@/domain/dates";
-import { extensionAllowed, resolveStoragePath } from "@/domain/files";
-import { invalidForm, type FormState } from "@/domain/form-state";
+import { contentTypeForStorageKey, extensionAllowed, resolveStoragePath } from "@/domain/files";
+import { completedForm, invalidForm, inviteReady, type FormState } from "@/domain/form-state";
+import { inviteExpiresAt, inviteIsOpen, isUserRole, memberCreateErrors, membershipChangeBlock, normaliseEmail } from "@/domain/membership";
+import { homeForRole } from "@/domain/navigation";
+import { organizationPath } from "@/domain/organization";
+import { localityFromPostcodePayload, normaliseUkPostcode, postcodeLookupStatus, propertyCreateErrors } from "@/domain/property";
 import { applyPayment, invoiceCollectionStatus, outstandingBalance } from "@/domain/invoices";
 import { DomainError, parsePoundsToPence } from "@/domain/money";
 import { canConfigureBank, canMutateFinance, canPostExpense, canManageSettings } from "@/domain/permissions";
 import { isExactAllocation } from "@/domain/reconciliation";
 import { parseBankCsv } from "@/domain/csv";
 import { appendAuditLog } from "@/server/audit";
+import { readUkPostcode } from "@/server/uk-address";
 import { prisma } from "@/server/db";
+import { hashInviteToken, newInviteToken } from "@/server/invite-token";
 import { fromPence, toPence } from "@/server/money";
 import { logServerError, nextReference } from "@/server/reference";
-import { clearSessionCookie, companyScope, createSessionToken, requireSession, writeSessionCookie } from "@/server/session";
+import { createOrganizationWithOwner } from "@/server/provision-organization";
+import { appOrigin } from "@/server/app-origin";
+import { clearLoginFailures, loginAttemptBlocked, recordLoginFailure } from "@/server/login-throttle";
+import { clearSessionCookie, createSessionToken, getAuthenticatedUser, landingPathForUser, organizationScope, requireSession, userCanCreateOrganization, writeSessionCookie } from "@/server/session";
+
+const LOGIN_TIMING_HASH = bcrypt.hashSync("login-timing-placeholder", 12);
 
 function rethrowRedirect(error: unknown): void {
   if (typeof error === "object" && error !== null && "digest" in error) {
@@ -82,21 +97,37 @@ function moneyField(formData: FormData, name: string, label: string): number | F
   return parsed;
 }
 
+function clientAddress(headerStore: Headers): string {
+  const forwarded = headerStore.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "";
+  const address = forwarded || headerStore.get("x-real-ip") || "unknown";
+  return address.slice(0, 64);
+}
+
 export async function loginAction(_previous: FormState, formData: FormData): Promise<FormState> {
-  const email = String(formData.get("email") ?? "").trim().toLowerCase();
+  const email = normaliseEmail(String(formData.get("email") ?? "")) ?? "";
   const password = String(formData.get("password") ?? "");
-  const user = await prisma.user.findUnique({ where: { email } });
-  const matches = user ? await bcrypt.compare(password, user.passwordHash) : false;
+  const address = clientAddress(await headers());
+  const now = Date.now();
+  if (loginAttemptBlocked(email, address, now)) {
+    return invalidForm(MESSAGE.LOGIN_LIMITED);
+  }
+  const user = email ? await prisma.user.findUnique({ where: { email } }) : null;
+  const matches = await bcrypt.compare(password, user?.passwordHash ?? LOGIN_TIMING_HASH);
   if (!user || !matches || !user.isActive) {
+    recordLoginFailure(email, address, now);
     return invalidForm(MESSAGE.INVALID_CREDENTIALS);
   }
-  const token = await createSessionToken({
-    userId: user.id,
-    tenantId: user.tenantId,
-    companyId: user.companyId,
+  clearLoginFailures(email, address);
+  const memberships = await prisma.organizationMembership.findMany({
+    where: { userId: user.id, status: "ACTIVE" },
+    include: { organization: true },
+    orderBy: { organization: { tradingName: "asc" } },
   });
+  const first = memberships[0];
+  const activeOrganizationId = memberships.length === 1 && first ? first.organizationId : null;
+  const token = await createSessionToken({ userId: user.id, organizationId: activeOrganizationId });
   await writeSessionCookie(token);
-  redirect("/");
+  redirect(await landingPathForUser(user.id));
 }
 
 export async function logoutAction(): Promise<void> {
@@ -154,7 +185,7 @@ export async function createBookingAction(_previous: FormState, formData: FormDa
     if (financials.grossRevenuePence <= 0) {
       return invalidForm(MESSAGE.VALIDATION, { accommodation: "Enter the guest charges." });
     }
-    const scope = companyScope(session);
+    const scope = organizationScope(session);
     const [property, customer] = await Promise.all([
       prisma.property.findFirst({ where: { id: propertyId, ...scope } }),
       prisma.customer.findFirst({ where: { id: customerId, ...scope } }),
@@ -164,7 +195,7 @@ export async function createBookingAction(_previous: FormState, formData: FormDa
     }
     const bookingId = await prisma.$transaction(async (tx) => {
       const latest = await tx.booking.findFirst({
-        where: { companyId: session.companyId },
+        where: { organizationId: session.organizationId },
         orderBy: { reference: "desc" },
         select: { reference: true },
       });
@@ -210,7 +241,7 @@ export async function createBookingAction(_previous: FormState, formData: FormDa
         if (amount <= 0) {
           continue;
         }
-        const category = await tx.incomeCategory.findFirst({ where: { companyId: session.companyId, code } });
+        const category = await tx.incomeCategory.findFirst({ where: { organizationId: session.organizationId, code } });
         if (!category) {
           throw new DomainError("Income categories are not set up.");
         }
@@ -234,12 +265,12 @@ export async function createBookingAction(_previous: FormState, formData: FormDa
       }
       if (financials.platformCostsPence > 0) {
         const feeCode = platformFeeCode(platformValue);
-        const feeCategory = await tx.expenseCategory.findFirst({ where: { companyId: session.companyId, code: feeCode } });
+        const feeCategory = await tx.expenseCategory.findFirst({ where: { organizationId: session.organizationId, code: feeCode } });
         if (!feeCategory) {
           throw new DomainError("Platform fee categories are not set up.");
         }
         const latestExpense = await tx.expense.findFirst({
-          where: { companyId: session.companyId },
+          where: { organizationId: session.organizationId },
           orderBy: { reference: "desc" },
           select: { reference: true },
         });
@@ -266,7 +297,7 @@ export async function createBookingAction(_previous: FormState, formData: FormDa
         });
       }
       if ((amounts.refundsPence as number) > 0) {
-        const count = await tx.refund.count({ where: { companyId: session.companyId } });
+        const count = await tx.refund.count({ where: { organizationId: session.organizationId } });
         await tx.refund.create({
           data: {
             ...scope,
@@ -289,14 +320,14 @@ export async function createBookingAction(_previous: FormState, formData: FormDa
       });
       return booking.id;
     });
-    redirect(`/bookings/${bookingId}`);
+    redirect(organizationPath(session.organizationSlug, `/bookings/${bookingId}`));
   }, "create-booking");
 }
 
 export async function createExpenseAction(_previous: FormState, formData: FormData): Promise<FormState> {
   return guard(async () => {
     const session = await requireSession();
-    const scope = companyScope(session);
+    const scope = organizationScope(session);
     const categoryId = String(formData.get("categoryId") ?? "");
     const category = await prisma.expenseCategory.findFirst({
       where: { id: categoryId, ...scope },
@@ -332,7 +363,7 @@ export async function createExpenseAction(_previous: FormState, formData: FormDa
     const catalog = catalogByCode(category.code);
     const expenseId = await prisma.$transaction(async (tx) => {
       const latest = await tx.expense.findFirst({
-        where: { companyId: session.companyId },
+        where: { organizationId: session.organizationId },
         orderBy: { reference: "desc" },
         select: { reference: true },
       });
@@ -371,7 +402,7 @@ export async function createExpenseAction(_previous: FormState, formData: FormDa
       });
       return expense.id;
     });
-    redirect(`/expenses?created=${expenseId}`);
+    redirect(organizationPath(session.organizationSlug, `/expenses?created=${expenseId}`));
   }, "create-expense");
 }
 
@@ -392,7 +423,7 @@ async function storeReceipt(
     throw new DomainError(MESSAGE.FILE_TYPE);
   }
   const extension = file.name.split(".").pop()?.toLowerCase() ?? "bin";
-  const storageKey = `${session.companyId}/${randomUUID()}.${extension}`;
+  const storageKey = `${session.organizationId}/${randomUUID()}.${extension}`;
   const absolute = resolveStoragePath(path.join(process.cwd(), "storage"), storageKey);
   if (!absolute) {
     throw new DomainError(MESSAGE.FILE_TYPE);
@@ -402,12 +433,12 @@ async function storeReceipt(
   await tx.document.create({
     data: {
       tenantId: session.tenantId,
-      companyId: session.companyId,
+      organizationId: session.organizationId,
       expenseId,
       kind: DOCUMENT_KIND.RECEIPT,
       title: file.name,
       storageKey,
-      mimeType: file.type || "application/octet-stream",
+      mimeType: contentTypeForStorageKey(storageKey) ?? "application/octet-stream",
       byteSize: file.size,
       createdById: session.userId,
     },
@@ -432,10 +463,10 @@ export async function createInvoiceAction(_previous: FormState, formData: FormDa
     if (dueDate < issueDate) {
       return invalidForm(MESSAGE.VALIDATION, { dueDate: "Due date cannot be before the issue date." });
     }
-    const scope = companyScope(session);
+    const scope = organizationScope(session);
     const [customer, company] = await Promise.all([
       prisma.customer.findFirst({ where: { id: customerId, ...scope } }),
-      prisma.company.findFirst({ where: { id: session.companyId, tenantId: session.tenantId } }),
+      prisma.organization.findFirst({ where: { id: session.organizationId, tenantId: session.tenantId } }),
     ]);
     if (!customer || !company) {
       return invalidForm(MESSAGE.NOT_FOUND);
@@ -444,7 +475,7 @@ export async function createInvoiceAction(_previous: FormState, formData: FormDa
     const gross = net + vat;
     const invoiceId = await prisma.$transaction(async (tx) => {
       const latest = await tx.invoice.findFirst({
-        where: { companyId: session.companyId },
+        where: { organizationId: session.organizationId },
         orderBy: { number: "desc" },
         select: { number: true },
       });
@@ -483,7 +514,7 @@ export async function createInvoiceAction(_previous: FormState, formData: FormDa
       });
       return invoice.id;
     });
-    redirect(`/invoices/${invoiceId}`);
+    redirect(organizationPath(session.organizationSlug, `/invoices/${invoiceId}`));
   }, "create-invoice");
 }
 
@@ -503,7 +534,7 @@ export async function recordPaymentAction(_previous: FormState, formData: FormDa
     }
     await prisma.$transaction(async (tx) => {
       const invoice = await tx.invoice.findFirst({
-        where: { id: invoiceId, ...companyScope(session) },
+        where: { id: invoiceId, ...organizationScope(session) },
         include: { payments: true },
       });
       if (!invoice || invoice.status === "VOID") {
@@ -513,10 +544,10 @@ export async function recordPaymentAction(_previous: FormState, formData: FormDa
       const alreadyPaid = invoice.payments.reduce((sum, payment) => sum + toPence(payment.amount), 0);
       const balance = outstandingBalance(total, Math.min(alreadyPaid, total));
       const nextBalance = applyPayment(balance, amount);
-      const count = await tx.payment.count({ where: { companyId: session.companyId } });
+      const count = await tx.payment.count({ where: { organizationId: session.organizationId } });
       await tx.payment.create({
         data: {
-          ...companyScope(session),
+          ...organizationScope(session),
           direction: "RECEIVED",
           method: methodValue,
           amount: fromPence(amount),
@@ -542,7 +573,7 @@ export async function recordPaymentAction(_previous: FormState, formData: FormDa
         summary: `${invoice.number} payment of ${amount} pence. Balance ${nextBalance} pence.`,
       });
     });
-    redirect(`/invoices/${invoiceId}`);
+    redirect(organizationPath(session.organizationSlug, `/invoices/${invoiceId}`));
   }, "record-payment");
 }
 
@@ -555,9 +586,9 @@ export async function reconcileAction(_previous: FormState, formData: FormData):
     const bankTransactionId = String(formData.get("bankTransactionId") ?? "");
     const payoutId = String(formData.get("payoutId") ?? "");
     await prisma.$transaction(async (tx) => {
-      const scope = companyScope(session);
+      const scope = organizationScope(session);
       const transaction = await tx.bankTransaction.findFirst({
-        where: { id: bankTransactionId, tenantId: scope.tenantId, companyId: scope.companyId, direction: "CREDIT" },
+        where: { id: bankTransactionId, tenantId: scope.tenantId, organizationId: scope.organizationId, direction: "CREDIT" },
       });
       const payout = await tx.payout.findFirst({
         where: { id: payoutId, ...scope },
@@ -587,7 +618,7 @@ export async function reconcileAction(_previous: FormState, formData: FormData):
         summary: `${payout.reference} matched to ${transaction.description}.`,
       });
     });
-    redirect("/reconciliation");
+    redirect(organizationPath(session.organizationSlug, "/reconciliation"));
   }, "reconcile");
 }
 
@@ -605,7 +636,7 @@ export async function importBankCsvAction(_previous: FormState, formData: FormDa
     if ("errors" in parsed) {
       return invalidForm(`${MESSAGE.CSV_REJECTED} ${parsed.errors.join(" ")}`);
     }
-    const account = await prisma.bankAccount.findFirst({ where: companyScope(session), orderBy: { createdAt: "asc" } });
+    const account = await prisma.bankAccount.findFirst({ where: organizationScope(session), orderBy: { createdAt: "asc" } });
     if (!account) {
       return invalidForm("Add a bank account before importing transactions.");
     }
@@ -614,7 +645,7 @@ export async function importBankCsvAction(_previous: FormState, formData: FormDa
         await tx.bankTransaction.create({
           data: {
             tenantId: session.tenantId,
-            companyId: session.companyId,
+            organizationId: session.organizationId,
             bankAccountId: account.id,
             occurredOn: new Date(`${row.occurredOn}T00:00:00.000Z`),
             description: row.description,
@@ -632,7 +663,7 @@ export async function importBankCsvAction(_previous: FormState, formData: FormDa
         summary: `Imported ${parsed.rows.length} bank transactions.`,
       });
     });
-    redirect("/banking");
+    redirect(organizationPath(session.organizationSlug, "/banking"));
   }, "import-bank");
 }
 
@@ -648,14 +679,14 @@ export async function createCustomerAction(_previous: FormState, formData: FormD
     }
     await prisma.customer.create({
       data: {
-        ...companyScope(session),
+        ...organizationScope(session),
         name,
         email: String(formData.get("email") ?? "") || null,
         phone: String(formData.get("phone") ?? "") || null,
         companyName: String(formData.get("companyName") ?? "") || null,
       },
     });
-    redirect("/customers");
+    redirect(organizationPath(session.organizationSlug, "/customers"));
   }, "create-customer");
 }
 
@@ -672,7 +703,7 @@ export async function createSupplierAction(_previous: FormState, formData: FormD
     }
     await prisma.supplier.create({
       data: {
-        ...companyScope(session),
+        ...organizationScope(session),
         name,
         category,
         email: String(formData.get("email") ?? "") || null,
@@ -680,8 +711,60 @@ export async function createSupplierAction(_previous: FormState, formData: FormD
         vatNumber: String(formData.get("vatNumber") ?? "") || null,
       },
     });
-    redirect("/suppliers");
+    redirect(organizationPath(session.organizationSlug, "/suppliers"));
   }, "create-supplier");
+}
+
+export async function createPropertyAction(_previous: FormState, formData: FormData): Promise<FormState> {
+  return guard(async () => {
+    const session = await requireSession();
+    if (!canMutateFinance(session.role)) {
+      return invalidForm(MESSAGE.UNAUTHORISED);
+    }
+    const name = String(formData.get("name") ?? "").trim();
+    const address = String(formData.get("address") ?? "").trim();
+    const cityInput = String(formData.get("city") ?? "").trim();
+    const postcode = normaliseUkPostcode(String(formData.get("postcode") ?? "")) ?? "";
+    const bedroomsRaw = String(formData.get("bedrooms") ?? "").trim();
+    const postcodePayload = postcode ? await readUkPostcode(postcode) : null;
+    if (postcodePayload && postcodeLookupStatus(postcodePayload) === "invalid") {
+      return invalidForm(MESSAGE.VALIDATION, { postcode: MESSAGE.PROPERTY_POSTCODE_UNKNOWN });
+    }
+    const locality = postcodePayload ? localityFromPostcodePayload(postcodePayload) : null;
+    const city = cityInput.length >= 2 ? cityInput : locality ?? "";
+    const fieldErrors = propertyCreateErrors({ name, address, city, postcode, bedroomsRaw });
+    if (Object.keys(fieldErrors).length > 0) {
+      return invalidForm(MESSAGE.VALIDATION, fieldErrors);
+    }
+    const existing = await prisma.property.findFirst({
+      where: {
+        organizationId: session.organizationId,
+        postcode,
+        address: { equals: address, mode: "insensitive" },
+      },
+      select: { id: true },
+    });
+    if (existing) {
+      return invalidForm(MESSAGE.PROPERTY_EXISTS, { address: MESSAGE.PROPERTY_EXISTS });
+    }
+    const property = await prisma.property.create({
+      data: {
+        ...organizationScope(session),
+        name,
+        address,
+        city,
+        postcode,
+        bedrooms: Number(bedroomsRaw),
+      },
+    });
+    await appendAuditLog(prisma, session, {
+      action: "PROPERTY_CREATED",
+      entityType: "property",
+      entityId: property.id,
+      summary: `Created property ${property.name}.`,
+    });
+    redirect(organizationPath(session.organizationSlug, `/properties/${property.id}`));
+  }, "create-property");
 }
 
 export async function updateSettingsAction(_previous: FormState, formData: FormData): Promise<FormState> {
@@ -699,8 +782,8 @@ export async function updateSettingsAction(_previous: FormState, formData: FormD
     if (!Number.isInteger(retention) || retention < DEFAULT_DOCUMENT_RETENTION_YEARS || retention > 15) {
       return invalidForm(MESSAGE.VALIDATION, { retentionYears: "Keep financial documents for at least 7 years." });
     }
-    await prisma.company.update({
-      where: { id: session.companyId },
+    await prisma.organization.update({
+      where: { id: session.organizationId },
       data: {
         tradingName,
         phone: phone || null,
@@ -711,9 +794,382 @@ export async function updateSettingsAction(_previous: FormState, formData: FormD
     await appendAuditLog(prisma, session, {
       action: "SETTINGS_UPDATED",
       entityType: "company",
-      entityId: session.companyId,
+      entityId: session.organizationId,
       summary: "Company settings updated.",
     });
-    redirect("/settings");
+    redirect(organizationPath(session.organizationSlug, "/settings"));
   }, "update-settings");
+}
+
+const MEMBER_INTENT = {
+  ROLE: "role",
+  DEACTIVATE: "deactivate",
+  ACTIVATE: "activate",
+} as const;
+
+function inviteLink(token: string): string {
+  return `${appOrigin()}/invite/${token}`;
+}
+
+function accessMessage(code: string | null): string | null {
+  if (code === "OWN_ACCESS") {
+    return MESSAGE.OWN_ACCESS;
+  }
+  if (code === "LAST_OWNER") {
+    return MESSAGE.LAST_OWNER;
+  }
+  return null;
+}
+
+export async function inviteUserAction(_previous: FormState, formData: FormData): Promise<FormState> {
+  return guard(async () => {
+    const session = await requireSession();
+    if (!canManageSettings(session.role)) {
+      return invalidForm(MESSAGE.UNAUTHORISED);
+    }
+    const email = normaliseEmail(String(formData.get("email") ?? ""));
+    const roleValue = String(formData.get("role") ?? "");
+    if (!email) {
+      return invalidForm(MESSAGE.VALIDATION, { email: "Enter a valid email address." });
+    }
+    if (!isUserRole(roleValue)) {
+      return invalidForm(MESSAGE.VALIDATION, { role: "Choose a role." });
+    }
+    const existingUser = await prisma.user.findUnique({ where: { email } });
+    if (existingUser) {
+      const membership = await prisma.organizationMembership.findUnique({
+        where: { organizationId_userId: { organizationId: session.organizationId, userId: existingUser.id } },
+      });
+      if (membership) {
+        return invalidForm(MESSAGE.ALREADY_MEMBER, { email: MESSAGE.ALREADY_MEMBER });
+      }
+    }
+    const token = newInviteToken();
+    const now = new Date();
+    await prisma.$transaction(async (tx) => {
+      await tx.invitation.updateMany({
+        where: {
+          tenantId: session.tenantId,
+          organizationId: session.organizationId,
+          email,
+          acceptedAt: null,
+          revokedAt: null,
+        },
+        data: { revokedAt: now },
+      });
+      await tx.invitation.create({
+        data: {
+          tenantId: session.tenantId,
+          organizationId: session.organizationId,
+          email,
+          role: roleValue,
+          tokenHash: hashInviteToken(token),
+          expiresAt: inviteExpiresAt(now),
+          invitedById: session.userId,
+        },
+      });
+    });
+    await appendAuditLog(prisma, session, {
+      action: "USER_INVITED",
+      entityType: "invitation",
+      entityId: email,
+      summary: `Invited ${email}.`,
+    });
+    revalidatePath(organizationPath(session.organizationSlug, "/settings"));
+    return inviteReady(inviteLink(token));
+  }, "invite-user");
+}
+
+export async function createMemberAction(_previous: FormState, formData: FormData): Promise<FormState> {
+  return guard(async () => {
+    const session = await requireSession();
+    if (!canManageSettings(session.role)) {
+      return invalidForm(MESSAGE.UNAUTHORISED);
+    }
+    const name = String(formData.get("name") ?? "").trim();
+    const email = normaliseEmail(String(formData.get("email") ?? ""));
+    const roleValue = String(formData.get("role") ?? "");
+    const password = String(formData.get("password") ?? "");
+    const confirmPassword = String(formData.get("confirmPassword") ?? "");
+    const existingUser = email ? await prisma.user.findUnique({ where: { email } }) : null;
+    const fieldErrors = memberCreateErrors({
+      name,
+      email,
+      role: roleValue,
+      password,
+      confirmPassword,
+      accountExists: existingUser !== null,
+    });
+    if (Object.keys(fieldErrors).length > 0 || !email || !isUserRole(roleValue)) {
+      return invalidForm(MESSAGE.VALIDATION, fieldErrors);
+    }
+    if (existingUser && !existingUser.isActive) {
+      return invalidForm(MESSAGE.ACCOUNT_DISABLED, { email: MESSAGE.ACCOUNT_DISABLED });
+    }
+    if (existingUser) {
+      const membership = await prisma.organizationMembership.findUnique({
+        where: { organizationId_userId: { organizationId: session.organizationId, userId: existingUser.id } },
+      });
+      if (membership) {
+        return invalidForm(MESSAGE.ALREADY_MEMBER, { email: MESSAGE.ALREADY_MEMBER });
+      }
+      await prisma.organizationMembership.create({
+        data: {
+          organizationId: session.organizationId,
+          userId: existingUser.id,
+          role: roleValue,
+          invitedById: session.userId,
+        },
+      });
+      await appendAuditLog(prisma, session, {
+        action: "USER_ADDED",
+        entityType: "user",
+        entityId: existingUser.id,
+        summary: `Added ${existingUser.email} to the organisation.`,
+      });
+      revalidatePath(organizationPath(session.organizationSlug, "/settings"));
+      return completedForm(MESSAGE.USER_ADDED);
+    }
+    const passwordHash = await bcrypt.hash(password, 12);
+    const created = await prisma.$transaction(async (transaction) => {
+      const user = await transaction.user.create({
+        data: { email, name, passwordHash },
+      });
+      await transaction.organizationMembership.create({
+        data: {
+          organizationId: session.organizationId,
+          userId: user.id,
+          role: roleValue,
+          invitedById: session.userId,
+        },
+      });
+      return user;
+    });
+    await appendAuditLog(prisma, session, {
+      action: "USER_CREATED",
+      entityType: "user",
+      entityId: created.id,
+      summary: `Created ${created.email}.`,
+    });
+    revalidatePath(organizationPath(session.organizationSlug, "/settings"));
+    return completedForm(MESSAGE.USER_CREATED);
+  }, "create-member");
+}
+
+export async function revokeInviteAction(_previous: FormState, formData: FormData): Promise<FormState> {
+  return guard(async () => {
+    const session = await requireSession();
+    if (!canManageSettings(session.role)) {
+      return invalidForm(MESSAGE.UNAUTHORISED);
+    }
+    const invitationId = String(formData.get("invitationId") ?? "");
+    const now = new Date();
+    const updated = await prisma.invitation.updateMany({
+      where: {
+        id: invitationId,
+        ...organizationScope(session),
+        acceptedAt: null,
+        revokedAt: null,
+      },
+      data: { revokedAt: now },
+    });
+    if (updated.count !== 1) {
+      return invalidForm(MESSAGE.NOT_FOUND);
+    }
+    await appendAuditLog(prisma, session, {
+      action: "INVITE_REVOKED",
+      entityType: "invitation",
+      entityId: invitationId,
+      summary: "Invite revoked.",
+    });
+    revalidatePath(organizationPath(session.organizationSlug, "/settings"));
+    return invalidForm(MESSAGE.SAVED);
+  }, "revoke-invite");
+}
+
+export async function updateMemberAction(_previous: FormState, formData: FormData): Promise<FormState> {
+  return guard(async () => {
+    const session = await requireSession();
+    if (!canManageSettings(session.role)) {
+      return invalidForm(MESSAGE.UNAUTHORISED);
+    }
+    const userId = String(formData.get("userId") ?? "");
+    const intent = String(formData.get("intent") ?? "");
+    const member = await prisma.organizationMembership.findFirst({
+      where: { userId, organizationId: session.organizationId },
+      include: { user: true },
+    });
+    if (!member || !isUserRole(member.role)) {
+      return invalidForm(MESSAGE.NOT_FOUND);
+    }
+    const requestedRole = String(formData.get("role") ?? member.role);
+    if (!isUserRole(requestedRole)) {
+      return invalidForm(MESSAGE.VALIDATION, { role: "Choose a role." });
+    }
+    const nextRole = intent === MEMBER_INTENT.ROLE ? requestedRole : member.role;
+    const nextActive = intent === MEMBER_INTENT.DEACTIVATE ? false : intent === MEMBER_INTENT.ACTIVATE ? true : member.status === "ACTIVE";
+    if (intent !== MEMBER_INTENT.ROLE && intent !== MEMBER_INTENT.DEACTIVATE && intent !== MEMBER_INTENT.ACTIVATE) {
+      return invalidForm(MESSAGE.VALIDATION);
+    }
+    const owners = await prisma.organizationMembership.findMany({
+      where: { organizationId: session.organizationId, role: "OWNER", status: "ACTIVE" },
+      select: { userId: true },
+    });
+    const blocked = accessMessage(membershipChangeBlock({
+      actorUserId: session.userId,
+      targetUserId: member.userId,
+      nextActive,
+      nextRole,
+      activeOwnerIds: owners.map((owner) => owner.userId),
+    }));
+    if (blocked) {
+      return invalidForm(blocked);
+    }
+    await prisma.organizationMembership.update({
+      where: { id: member.id },
+      data: { role: nextRole, status: nextActive ? "ACTIVE" : "SUSPENDED" },
+    });
+    await appendAuditLog(prisma, session, {
+      action: "USER_ACCESS_UPDATED",
+      entityType: "user",
+      entityId: member.userId,
+      summary: nextActive ? `Updated access for ${member.user.email}.` : `Turned off access for ${member.user.email}.`,
+    });
+    revalidatePath(organizationPath(session.organizationSlug, "/settings"));
+    return invalidForm(MESSAGE.SAVED);
+  }, "update-member");
+}
+
+export async function acceptInviteAction(_previous: FormState, formData: FormData): Promise<FormState> {
+  return guard(async () => {
+    const token = String(formData.get("token") ?? "");
+    const name = String(formData.get("name") ?? "").trim();
+    const password = String(formData.get("password") ?? "");
+    const confirmPassword = String(formData.get("confirmPassword") ?? "");
+    if (name.length < 2 || name.length > 80) {
+      return invalidForm(MESSAGE.VALIDATION, { name: "Enter your name." });
+    }
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      return invalidForm(MESSAGE.PASSWORD_SHORT, { password: MESSAGE.PASSWORD_SHORT });
+    }
+    if (password !== confirmPassword) {
+      return invalidForm(MESSAGE.PASSWORD_MISMATCH, { confirmPassword: MESSAGE.PASSWORD_MISMATCH });
+    }
+    const now = new Date();
+    const invitation = await prisma.invitation.findUnique({ where: { tokenHash: hashInviteToken(token) } });
+    if (!invitation || !isUserRole(invitation.role) || !inviteIsOpen({
+      expiresAt: invitation.expiresAt,
+      acceptedAt: invitation.acceptedAt,
+      revokedAt: invitation.revokedAt,
+      now,
+    })) {
+      return invalidForm(MESSAGE.INVITE_CLOSED);
+    }
+    const existing = await prisma.user.findUnique({ where: { email: invitation.email } });
+    const organization = await prisma.organization.findUnique({ where: { id: invitation.organizationId } });
+    if (!organization) {
+      return invalidForm(MESSAGE.INVITE_CLOSED);
+    }
+    if (existing) {
+      const passwordMatches = await bcrypt.compare(password, existing.passwordHash);
+      if (!passwordMatches || !existing.isActive) {
+        return invalidForm(MESSAGE.INVALID_CREDENTIALS);
+      }
+      const already = await prisma.organizationMembership.findUnique({
+        where: { organizationId_userId: { organizationId: organization.id, userId: existing.id } },
+      });
+      if (already) {
+        return invalidForm(MESSAGE.ALREADY_MEMBER);
+      }
+    }
+    const passwordHash = existing ? null : await bcrypt.hash(password, 12);
+    const user = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.invitation.updateMany({
+        where: { id: invitation.id, acceptedAt: null, revokedAt: null, expiresAt: { gt: now } },
+        data: { acceptedAt: now },
+      });
+      if (claimed.count !== 1) {
+        throw new DomainError(MESSAGE.INVITE_CLOSED);
+      }
+      const account = existing ?? await tx.user.create({
+        data: {
+          email: invitation.email,
+          name,
+          passwordHash: passwordHash ?? "",
+        },
+      });
+      await tx.organizationMembership.create({
+        data: {
+          organizationId: organization.id,
+          userId: account.id,
+          role: invitation.role,
+          invitedById: invitation.invitedById,
+        },
+      });
+      return account;
+    });
+    await appendAuditLog(prisma, {
+      userId: user.id,
+      tenantId: organization.tenantId,
+      organizationId: organization.id,
+      organizationSlug: organization.slug,
+      role: invitation.role,
+      name: user.name,
+      email: user.email,
+    }, {
+      action: "USER_JOINED",
+      entityType: "user",
+      entityId: user.id,
+      summary: `${user.email} joined ${organization.tradingName}.`,
+    });
+    const sessionToken = await createSessionToken({
+      userId: user.id,
+      organizationId: organization.id,
+    });
+    await writeSessionCookie(sessionToken);
+    redirect(organizationPath(organization.slug, homeForRole(invitation.role)));
+  }, "accept-invite");
+}
+
+export async function createOrganizationAction(_previous: FormState, formData: FormData): Promise<FormState> {
+  return guard(async () => {
+    const user = await getAuthenticatedUser();
+    if (!user) {
+      redirect("/login");
+    }
+    if (!(await userCanCreateOrganization(user.userId))) {
+      return invalidForm(MESSAGE.ORGANISATION_CREATE_DENIED);
+    }
+    const tradingName = String(formData.get("tradingName") ?? "").trim();
+    const legalName = String(formData.get("legalName") ?? "").trim();
+    const email = normaliseEmail(String(formData.get("email") ?? ""));
+    const addressLine1 = String(formData.get("addressLine1") ?? "").trim();
+    const city = String(formData.get("city") ?? "").trim();
+    const postcode = String(formData.get("postcode") ?? "").trim().toUpperCase();
+    if (tradingName.length < 2) {
+      return invalidForm(MESSAGE.VALIDATION, { tradingName: "Enter the organisation name." });
+    }
+    if (legalName.length < 2) {
+      return invalidForm(MESSAGE.VALIDATION, { legalName: "Enter the legal name." });
+    }
+    if (!email) {
+      return invalidForm(MESSAGE.VALIDATION, { email: "Enter a valid email address." });
+    }
+    if (addressLine1.length < 2 || city.length < 2 || postcode.length < 5) {
+      return invalidForm(MESSAGE.VALIDATION, { addressLine1: "Enter the registered address, city, and postcode." });
+    }
+    const created = await createOrganizationWithOwner(prisma, {
+      userId: user.userId,
+      tradingName,
+      legalName,
+      email,
+      addressLine1,
+      city,
+      postcode,
+      role: USER_ROLE.OWNER,
+    });
+    const sessionToken = await createSessionToken({ userId: user.userId, organizationId: created.organizationId });
+    await writeSessionCookie(sessionToken);
+    redirect(organizationPath(created.slug));
+  }, "create-organization");
 }

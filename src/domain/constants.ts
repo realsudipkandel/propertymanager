@@ -2,8 +2,11 @@ export const CURRENCY_GBP = "GBP";
 
 export const USER_ROLE = {
   OWNER: "OWNER",
+  ORGANIZATION_ADMIN: "ORGANIZATION_ADMIN",
+  FINANCE_MANAGER: "FINANCE_MANAGER",
   ACCOUNTANT: "ACCOUNTANT",
   PROPERTY_MANAGER: "PROPERTY_MANAGER",
+  OPERATIONS: "OPERATIONS",
   CLEANER: "CLEANER",
   VIEWER: "VIEWER",
 } as const;
@@ -250,7 +253,8 @@ export const BILL_HORIZON_DAYS = 30;
 export const SEARCH_MIN_LENGTH = 2;
 export const SEARCH_MAX_LENGTH = 120;
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
-export const LIST_LIMIT = 200;
+export const MIN_PASSWORD_LENGTH = 12;
+export const INVITE_LIFETIME_DAYS = 7;
 
 export const PARENT_CATEGORY = {
   ACCOMMODATION: "ACCOMMODATION",
@@ -311,7 +315,9 @@ export const ALLOWED_UPLOAD_EXTENSIONS = ["pdf", "jpg", "jpeg", "png", "heic"] a
 
 export const MESSAGE = {
   INVALID_CREDENTIALS: "Email or password is incorrect.",
+  LOGIN_LIMITED: "Too many sign-in attempts. Wait 15 minutes and try again.",
   UNAUTHORISED: "You do not have permission to do that.",
+  ORGANISATION_CREATE_DENIED: "Only an owner or organisation admin can create an organisation.",
   NOT_FOUND: "That record was not found.",
   VALIDATION: "Check the highlighted fields.",
   PAYMENT_EXCEEDS_BALANCE: "Payment is greater than the outstanding balance.",
@@ -325,4 +331,20 @@ export const MESSAGE = {
   CSV_REJECTED: "The file was not imported. Fix the listed rows and try again.",
   SAVED: "Saved.",
   RECONCILED: "Bank transaction reconciled.",
+  EMAIL_IN_USE: "That person already belongs to this organisation.",
+  ALREADY_MEMBER: "That person already belongs to this organisation.",
+  USER_CREATED: "User created. They can sign in with that email and password.",
+  USER_ADDED: "Added to this organisation. They sign in with their existing password.",
+  ACCOUNT_DISABLED: "That account is disabled and cannot be added.",
+  LAST_OWNER: "The company needs at least one active owner.",
+  OWN_ACCESS: "You cannot change your own access.",
+  INVITE_CLOSED: "This invite is no longer valid. Ask an owner for a new link.",
+  PASSWORD_SHORT: "Use at least 12 characters.",
+  PASSWORD_MISMATCH: "The passwords do not match.",
+  PROPERTY_EXISTS: "This address is already a property in this organisation.",
+  PROPERTY_POSTCODE_UNKNOWN: "That is not a UK postcode.",
+  PROPERTY_SEARCH_SHORT: "Enter a street or a postcode.",
+  PROPERTY_SEARCH_LONG: "Shorten the address and try again.",
+  PROPERTY_SEARCH_NONE: "No matching UK address. Enter the property details.",
+  PROPERTY_SEARCH_UNAVAILABLE: "Address search is unavailable. Check the details below.",
 } as const;

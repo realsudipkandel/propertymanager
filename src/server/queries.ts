@@ -1,11 +1,8 @@
 import {
-  BILL_HORIZON_DAYS,
   COST_BEHAVIOUR,
   FULL_BUSINESS_USE_BPS,
-  INVOICE_STATUS,
   LEDGER_KIND,
   PARENT_CATEGORY,
-  SUPPLIER_BILL_STATUS,
   TAX_CLASSIFICATION,
 } from "@/domain/constants";
 import {
@@ -16,24 +13,22 @@ import {
   daysInPeriod,
   formatDisplayDate,
   todayIso,
-  trailingMonths,
   ukTaxYearContaining,
   type DatePeriod,
   type IsoDate,
 } from "@/domain/dates";
 import { postalAddressLines } from "@/domain/address";
-import { buildAlerts, type AlertItem } from "@/domain/alerts";
 import { calculatePropertyKpis } from "@/domain/kpis";
 import { formatGbp, formatMargin } from "@/domain/money";
 import { PLATFORM_LABEL, RECONCILIATION_LABEL, TAX_LABEL } from "@/domain/labels";
 import { buildProfitAndLoss, linesForProperty, revenueByChannel, summariseCash, type LedgerLine, type ProfitAndLoss } from "@/domain/reports";
-import { ageingBucket, invoiceCollectionStatus, outstandingBalance, supplierBillStatus } from "@/domain/invoices";
+import { ageingBucket, invoiceCollectionStatus, outstandingBalance } from "@/domain/invoices";
 import { suggestUniqueAmountMatch } from "@/domain/reconciliation";
 import { activeTaxConfig, assessVatThreshold } from "@/domain/vat";
 import { bookingContributionPence } from "@/domain/accounting";
 import { prisma } from "@/server/db";
 import { percentToBasisPoints, toPence } from "@/server/money";
-import { companyScope, type Session } from "@/server/session";
+import { organizationScope, type Session } from "@/server/session";
 
 function periodDates(period: DatePeriod): { gte: Date; lt: Date } {
   return {
@@ -42,8 +37,8 @@ function periodDates(period: DatePeriod): { gte: Date; lt: Date } {
   };
 }
 
-async function loadLines(session: Session, period: DatePeriod): Promise<LedgerLine[]> {
-  const scope = companyScope(session);
+export async function loadLedgerLines(session: Session, period: DatePeriod): Promise<LedgerLine[]> {
+  const scope = organizationScope(session);
   const range = periodDates(period);
   const [incomes, refunds, expenses] = await Promise.all([
     prisma.income.findMany({
@@ -112,263 +107,10 @@ async function loadLines(session: Session, period: DatePeriod): Promise<LedgerLi
   return lines;
 }
 
-export type DashboardModel = {
-  companyName: string;
-  monthLabel: string;
-  revenuePence: number;
-  expensesPence: number;
-  profitPence: number;
-  marginLabel: string;
-  outstandingPence: number;
-  upcomingPence: number;
-  bankPence: number;
-  kpis: Array<{ label: string; value: string }>;
-  properties: Array<{
-    id: string;
-    name: string;
-    revenuePence: number;
-    expensesPence: number;
-    profitPence: number;
-    marginLabel: string;
-  }>;
-  upcoming: Array<{ dateLabel: string; name: string; amountPence: number }>;
-  alerts: AlertItem[];
-  chart: Array<{ month: string; revenue: number; expenses: number }>;
-  cash: { inPence: number; outPence: number; netPence: number };
-};
-
-export async function getDashboard(session: Session): Promise<DashboardModel> {
-  const scope = companyScope(session);
-  const today = todayIso();
-  const month = calendarMonthContaining(today);
-  const months = trailingMonths(today, 6);
-  const first = months[0] ?? month;
-  const last = months[months.length - 1] ?? month;
-  const wide: DatePeriod = { start: first.start, endExclusive: last.endExclusive, label: month.label };
-  const [company, lines, properties, bookings, invoices, accounts, recurring, bills, documents, contracts, taxSettings] =
-    await Promise.all([
-      prisma.company.findFirstOrThrow({ where: { id: session.companyId, tenantId: session.tenantId } }),
-      loadLines(session, wide),
-      prisma.property.findMany({ where: scope, orderBy: { name: "asc" } }),
-      prisma.booking.findMany({ where: { ...scope, checkInDate: periodDates(month) } }),
-      prisma.invoice.findMany({ where: scope, include: { payments: true } }),
-      prisma.bankAccount.findMany({ where: scope, include: { transactions: true } }),
-      prisma.recurringExpense.findMany({ where: { ...scope, isActive: true }, orderBy: { nextDueOn: "asc" } }),
-      prisma.supplierBill.findMany({ where: scope, include: { supplier: true, payments: true } }),
-      prisma.document.findMany({ where: { ...scope, expiresOn: { not: null } }, include: { property: true } }),
-      prisma.propertyContract.findMany({ where: scope, include: { property: true } }),
-      prisma.taxSetting.findMany({ where: scope, orderBy: { effectiveFrom: "desc" } }),
-    ]);
-
-  const statement = buildProfitAndLoss(lines, month);
-  const propertyRows = properties.map((property) => {
-    const propertyStatement = buildProfitAndLoss(linesForProperty(lines, property.id), month);
-    return {
-      id: property.id,
-      name: property.name,
-      revenuePence: propertyStatement.grossRevenuePence,
-      expensesPence: propertyStatement.operatingExpensesPence,
-      profitPence: propertyStatement.operatingProfitPence,
-      marginLabel: formatMargin(propertyStatement.marginBps),
-    };
-  });
-
-  let opening = 0;
-  let credits = 0;
-  let debits = 0;
-  let monthCredits = 0;
-  let monthDebits = 0;
-  let unmatchedBank = 0;
-  for (const account of accounts) {
-    opening += toPence(account.openingBalance);
-    for (const transaction of account.transactions) {
-      const amount = toPence(transaction.amount);
-      const occurred = dateToIso(transaction.occurredOn);
-      if (transaction.direction === "CREDIT") {
-        credits += amount;
-        if (occurred >= month.start && occurred < month.endExclusive) {
-          monthCredits += amount;
-        }
-      } else {
-        debits += amount;
-        if (occurred >= month.start && occurred < month.endExclusive) {
-          monthDebits += amount;
-        }
-      }
-      if (transaction.reconciliationStatus === "UNMATCHED") {
-        unmatchedBank += 1;
-      }
-    }
-  }
-  const cashPosition = summariseCash({ openingPence: opening, creditsPence: credits, debitsPence: debits });
-  const monthCash = summariseCash({ openingPence: 0, creditsPence: monthCredits, debitsPence: monthDebits });
-
-  let outstanding = 0;
-  let overdueInvoices = 0;
-  for (const invoice of invoices) {
-    if (invoice.status === INVOICE_STATUS.VOID) {
-      continue;
-    }
-    const paid = invoice.payments.reduce((total, payment) => total + toPence(payment.amount), 0);
-    const balance = Math.max(0, toPence(invoice.grossAmount) - paid);
-    outstanding += balance;
-    const status = invoiceCollectionStatus({
-      totalPence: toPence(invoice.grossAmount),
-      paidPence: Math.min(paid, toPence(invoice.grossAmount)),
-      dueOn: dateToIso(invoice.dueDate),
-      today,
-      isVoid: false,
-      isDraft: invoice.status === INVOICE_STATUS.DRAFT,
-    });
-    if (status === INVOICE_STATUS.OVERDUE) {
-      overdueInvoices += 1;
-    }
-  }
-
-  const horizon = addDays(today, BILL_HORIZON_DAYS);
-  const upcoming = recurring
-    .filter((item) => {
-      const due = dateToIso(item.nextDueOn);
-      return due >= today && due <= horizon;
-    })
-    .map((item) => ({
-      dateLabel: formatDisplayDate(dateToIso(item.nextDueOn)),
-      name: item.name,
-      amountPence: toPence(item.amount),
-    }));
-  const upcomingPence = upcoming.reduce((total, item) => total + item.amountPence, 0);
-
-  const supplierBillsDue = bills.filter((bill) => {
-    const paid = bill.payments.reduce((total, payment) => total + toPence(payment.amount), 0);
-    const status = supplierBillStatus({
-      totalPence: toPence(bill.grossAmount),
-      paidPence: Math.min(paid, toPence(bill.grossAmount)),
-      dueOn: dateToIso(bill.dueDate),
-      today,
-      isVoid: bill.status === SUPPLIER_BILL_STATUS.VOID,
-      isDraft: bill.status === SUPPLIER_BILL_STATUS.DRAFT,
-      isDisputed: bill.status === SUPPLIER_BILL_STATUS.DISPUTED,
-    });
-    return status === SUPPLIER_BILL_STATUS.DUE || status === SUPPLIER_BILL_STATUS.OVERDUE || status === SUPPLIER_BILL_STATUS.PARTIALLY_PAID;
-  }).length;
-
-  const rentDue = recurring.filter((item) => item.name.toLowerCase().includes("rent") && dateToIso(item.nextDueOn) <= horizon).length;
-  const unmatchedPayouts = await prisma.payout.count({ where: { ...scope, reconciliationStatus: "UNMATCHED" } });
-
-  const rollingStart = addDays(today, -365);
-  const rolling = buildProfitAndLoss(lines.filter((line) => line.occurredOn >= rollingStart), {
-    start: rollingStart,
-    endExclusive: addDays(today, 1),
-    label: "Rolling",
-  });
-  const config = activeTaxConfig(
-    taxSettings.map((setting) => ({
-      thresholdPence: toPence(setting.thresholdAmount),
-      effectiveFrom: dateToIso(setting.effectiveFrom),
-      effectiveTo: setting.effectiveTo ? dateToIso(setting.effectiveTo) : null,
-    })),
-    today,
-  );
-  const vat = config
-    ? assessVatThreshold(Math.max(0, rolling.netRevenuePence), config.thresholdPence)
-    : null;
-
-  const utilityCodes = new Set(["UTILITIES"]);
-  const utilityThis = lines
-    .filter((line) => line.kind === LEDGER_KIND.EXPENSE && line.parentCategoryCode && utilityCodes.has(line.parentCategoryCode) && line.occurredOn >= month.start && line.occurredOn < month.endExclusive)
-    .reduce((total, line) => total + line.amountPence, 0);
-  const previous = trailingMonths(today, 2)[0];
-  const utilityPrevious = previous
-    ? lines
-        .filter((line) => line.kind === LEDGER_KIND.EXPENSE && line.parentCategoryCode === PARENT_CATEGORY.UTILITIES && line.occurredOn >= previous.start && line.occurredOn < previous.endExclusive)
-        .reduce((total, line) => total + line.amountPence, 0)
-    : 0;
-
-  const alerts = buildAlerts({
-    today,
-    overdueInvoices,
-    supplierBillsDue,
-    rentDue,
-    unmatchedBankTransactions: unmatchedBank,
-    unmatchedPayouts,
-    vatWarning: vat?.warning ?? "NONE",
-    certificateExpiries: documents
-      .filter((document) => document.kind === "COMPLIANCE_CERTIFICATE" && document.expiresOn)
-      .map((document) => ({
-        name: document.title,
-        propertyName: document.property?.name ?? "Company",
-        expiresOn: dateToIso(document.expiresOn ?? new Date()),
-      })),
-    leaseEnds: contracts.map((contract) => ({
-      propertyName: contract.property.name,
-      endsOn: dateToIso(contract.leaseEnd),
-    })),
-    renewals: recurring
-      .filter((item) => item.renewalOn)
-      .map((item) => ({ name: item.name, renewsOn: dateToIso(item.renewalOn ?? item.nextDueOn) })),
-    insuranceExpiries: documents
-      .filter((document) => document.kind === "INSURANCE" && document.expiresOn)
-      .map((document) => ({ name: document.title, expiresOn: dateToIso(document.expiresOn ?? new Date()) })),
-    utilityThisMonthPence: utilityThis,
-    utilityPreviousMonthPence: utilityPrevious,
-  });
-
-  const occupiedNights = bookings.reduce((total, booking) => total + booking.numberOfNights, 0);
-  const accommodation = lines
-    .filter((line) => line.kind === LEDGER_KIND.INCOME && line.parentCategoryCode === PARENT_CATEGORY.ACCOMMODATION && line.occurredOn >= month.start && line.occurredOn < month.endExclusive)
-    .reduce((total, line) => total + line.amountPence, 0);
-  const cleaning = lines
-    .filter((line) => line.kind === LEDGER_KIND.EXPENSE && line.parentCategoryCode === PARENT_CATEGORY.CLEANING && line.occurredOn >= month.start && line.occurredOn < month.endExclusive)
-    .reduce((total, line) => total + line.amountPence, 0);
-  const kpis = calculatePropertyKpis({
-    availableNights: properties.length * daysInPeriod(month),
-    occupiedNights,
-    accommodationRevenuePence: accommodation,
-    grossRevenuePence: statement.grossRevenuePence,
-    bookingCount: bookings.length,
-    cleaningCostPence: cleaning,
-    otaFeesPence: statement.otaFeesPence,
-    operatingProfitPence: statement.operatingProfitPence,
-  });
-
-  const chart = months.map((item) => {
-    const itemStatement = buildProfitAndLoss(lines, item);
-    return {
-      month: item.label.replace(` ${today.slice(0, 4)}`, ""),
-      revenue: itemStatement.grossRevenuePence / 100,
-      expenses: itemStatement.operatingExpensesPence / 100,
-    };
-  });
-
-  return {
-    companyName: company.tradingName,
-    monthLabel: month.label,
-    revenuePence: statement.grossRevenuePence,
-    expensesPence: statement.operatingExpensesPence,
-    profitPence: statement.operatingProfitPence,
-    marginLabel: formatMargin(statement.marginBps),
-    outstandingPence: outstanding,
-    upcomingPence,
-    bankPence: cashPosition.closingPence,
-    kpis: [
-      { label: "Occupancy", value: formatMargin(kpis.occupancyBps) },
-      { label: "ADR", value: kpis.adrPence === null ? "—" : formatGbp(kpis.adrPence) },
-      { label: "RevPAR", value: kpis.revparPence === null ? "—" : formatGbp(kpis.revparPence) },
-      { label: "Average stay", value: kpis.averageStayNights === null ? "—" : `${kpis.averageStayNights.toFixed(1)} nights` },
-      { label: "Bookings", value: String(bookings.length) },
-      { label: "Average booking", value: kpis.averageBookingValuePence === null ? "—" : formatGbp(kpis.averageBookingValuePence) },
-    ],
-    properties: propertyRows,
-    upcoming,
-    alerts,
-    chart,
-    cash: { inPence: monthCash.cashInPence, outPence: monthCash.cashOutPence, netPence: monthCash.netPence },
-  };
-}
 
 export async function listBookings(session: Session) {
   const rows = await prisma.booking.findMany({
-    where: companyScope(session),
+    where: organizationScope(session),
     include: { property: true, customer: true },
     orderBy: { checkInDate: "desc" },
     take: 200,
@@ -391,7 +133,7 @@ export async function listBookings(session: Session) {
 
 export async function getBooking(session: Session, id: string) {
   const booking = await prisma.booking.findFirst({
-    where: { id, ...companyScope(session) },
+    where: { id, ...organizationScope(session) },
     include: {
       property: true,
       customer: true,
@@ -451,7 +193,7 @@ export async function getBooking(session: Session, id: string) {
 
 export async function listIncome(session: Session) {
   const rows = await prisma.income.findMany({
-    where: companyScope(session),
+    where: organizationScope(session),
     include: { category: true, property: true, customer: true, booking: true },
     orderBy: { serviceDate: "desc" },
     take: 300,
@@ -472,7 +214,7 @@ export async function listIncome(session: Session) {
 
 export async function listExpenses(session: Session) {
   const rows = await prisma.expense.findMany({
-    where: companyScope(session),
+    where: organizationScope(session),
     include: { category: { include: { parent: true } }, property: true, supplier: true },
     orderBy: { transactionDate: "desc" },
     take: 300,
@@ -484,6 +226,8 @@ export async function listExpenses(session: Session) {
     supplier: expense.supplier?.name ?? "—",
     property: expense.property?.name ?? "Company",
     category: expense.category.parent?.name ?? expense.category.name,
+    categoryCode: expense.category.parent?.code ?? expense.category.code,
+    leafCode: expense.category.code,
     detail: expense.description,
     grossPence: toPence(expense.grossAmount),
     vatPence: toPence(expense.vatAmount),
@@ -492,7 +236,7 @@ export async function listExpenses(session: Session) {
 }
 
 export async function expenseFormOptions(session: Session) {
-  const scope = companyScope(session);
+  const scope = organizationScope(session);
   const [properties, suppliers, categories, bookings] = await Promise.all([
     prisma.property.findMany({ where: scope, orderBy: { name: "asc" } }),
     prisma.supplier.findMany({ where: scope, orderBy: { name: "asc" } }),
@@ -511,7 +255,7 @@ export async function expenseFormOptions(session: Session) {
 }
 
 export async function bookingFormOptions(session: Session) {
-  const scope = companyScope(session);
+  const scope = organizationScope(session);
   const [properties, customers] = await Promise.all([
     prisma.property.findMany({ where: scope, orderBy: { name: "asc" } }),
     prisma.customer.findMany({ where: scope, orderBy: { name: "asc" } }),
@@ -525,7 +269,7 @@ export async function bookingFormOptions(session: Session) {
 export async function listInvoices(session: Session) {
   const today = todayIso();
   const rows = await prisma.invoice.findMany({
-    where: companyScope(session),
+    where: organizationScope(session),
     include: { customer: true, payments: true },
     orderBy: { issueDate: "desc" },
   });
@@ -556,8 +300,8 @@ export async function listInvoices(session: Session) {
 
 export async function getInvoice(session: Session, id: string) {
   const invoice = await prisma.invoice.findFirst({
-    where: { id, ...companyScope(session) },
-    include: { customer: true, items: true, payments: true, company: true },
+    where: { id, ...organizationScope(session) },
+    include: { customer: true, items: true, payments: true, organization: true },
   });
   if (!invoice) {
     return null;
@@ -569,20 +313,21 @@ export async function getInvoice(session: Session, id: string) {
   return {
     id: invoice.id,
     number: invoice.number,
-    company: invoice.company.legalName,
-    tradingName: invoice.company.tradingName,
+    company: invoice.organization.legalName,
+    tradingName: invoice.organization.tradingName,
+    logoUrl: invoice.organization.logoUrl,
     addressLines: postalAddressLines({
-      line1: invoice.company.addressLine1,
-      line2: invoice.company.addressLine2,
-      line3: invoice.company.addressLine3,
-      city: invoice.company.city,
-      postcode: invoice.company.postcode,
+      line1: invoice.organization.addressLine1,
+      line2: invoice.organization.addressLine2,
+      line3: invoice.organization.addressLine3,
+      city: invoice.organization.city,
+      postcode: invoice.organization.postcode,
     }),
-    companyNumber: invoice.company.companyNumber,
-    email: invoice.company.email,
-    phone: invoice.company.phone,
-    vatNumber: invoice.company.vatNumber,
-    vatRegistered: invoice.company.vatRegistered,
+    companyNumber: invoice.organization.companyNumber,
+    email: invoice.organization.email,
+    phone: invoice.organization.phone,
+    vatNumber: invoice.organization.vatNumber,
+    vatRegistered: invoice.organization.vatRegistered,
     customer: invoice.customer.name,
     customerEmail: invoice.customer.email,
     issued: formatDisplayDate(dateToIso(invoice.issueDate)),
@@ -619,7 +364,7 @@ export async function getInvoice(session: Session, id: string) {
 
 export async function listPayments(session: Session) {
   const rows = await prisma.payment.findMany({
-    where: companyScope(session),
+    where: organizationScope(session),
     include: { invoice: true, supplierBill: true, expense: true },
     orderBy: { paidOn: "desc" },
     take: 200,
@@ -638,9 +383,9 @@ export async function listPayments(session: Session) {
 export async function listProperties(session: Session) {
   const today = todayIso();
   const month = calendarMonthContaining(today);
-  const lines = await loadLines(session, month);
+  const lines = await loadLedgerLines(session, month);
   const properties = await prisma.property.findMany({
-    where: companyScope(session),
+    where: organizationScope(session),
     orderBy: { name: "asc" },
   });
   return properties.map((property) => {
@@ -658,19 +403,19 @@ export async function listProperties(session: Session) {
 }
 
 export async function getPropertyReport(session: Session, id: string) {
-  const property = await prisma.property.findFirst({ where: { id, ...companyScope(session) } });
+  const property = await prisma.property.findFirst({ where: { id, ...organizationScope(session) } });
   if (!property) {
     return null;
   }
   const today = todayIso();
   const month = calendarMonthContaining(today);
-  const lines = await loadLines(session, month);
+  const lines = await loadLedgerLines(session, month);
   const statement = buildProfitAndLoss(linesForProperty(lines, property.id), month);
   const bookings = await prisma.booking.findMany({
-    where: { ...companyScope(session), propertyId: property.id, checkInDate: periodDates(month) },
+    where: { ...organizationScope(session), propertyId: property.id, status: { not: "CANCELLED" }, checkInDate: periodDates(month) },
   });
   const budgets = await prisma.budget.findMany({
-    where: { ...companyScope(session), propertyId: property.id, periodStart: periodDates(month).gte },
+    where: { ...organizationScope(session), propertyId: property.id, periodStart: periodDates(month).gte },
   });
   const occupied = bookings.reduce((total, booking) => total + booking.numberOfNights, 0);
   const accommodation = linesForProperty(lines, property.id)
@@ -692,6 +437,14 @@ export async function getPropertyReport(session: Session, id: string) {
     monthLabel: month.label,
     statement,
     kpis,
+    occupiedNights: occupied,
+    channels: revenueByChannel(
+      bookings.map((booking) => ({
+        channel: PLATFORM_LABEL[booking.platform],
+        grossRevenuePence: toPence(booking.grossRevenue),
+        platformCostsPence: toPence(booking.platformCommission) + toPence(booking.paymentProcessingFee),
+      })),
+    ),
     budgets: budgets.map((budget) => ({ label: budget.label, amountPence: toPence(budget.amount) })),
     actualRevenuePence: statement.grossRevenuePence,
   };
@@ -699,16 +452,16 @@ export async function getPropertyReport(session: Session, id: string) {
 
 export async function listParties(session: Session, kind: "customers" | "suppliers") {
   if (kind === "customers") {
-    const rows = await prisma.customer.findMany({ where: companyScope(session), orderBy: { name: "asc" } });
+    const rows = await prisma.customer.findMany({ where: organizationScope(session), orderBy: { name: "asc" } });
     return rows.map((row) => ({ id: row.id, name: row.name, detail: row.email ?? row.companyName ?? "Guest", extra: row.phone ?? "" }));
   }
-  const rows = await prisma.supplier.findMany({ where: companyScope(session), orderBy: { name: "asc" } });
+  const rows = await prisma.supplier.findMany({ where: organizationScope(session), orderBy: { name: "asc" } });
   return rows.map((row) => ({ id: row.id, name: row.name, detail: row.category, extra: row.vatNumber ?? row.email ?? "" }));
 }
 
 export async function getBanking(session: Session) {
   const accounts = await prisma.bankAccount.findMany({
-    where: companyScope(session),
+    where: organizationScope(session),
     include: { transactions: { orderBy: { occurredOn: "desc" } } },
   });
   return accounts.map((account) => {
@@ -737,7 +490,7 @@ export async function getBanking(session: Session) {
 }
 
 export async function getReconciliation(session: Session) {
-  const scope = companyScope(session);
+  const scope = organizationScope(session);
   const [transactions, payouts] = await Promise.all([
     prisma.bankTransaction.findMany({
       where: { ...scope, direction: "CREDIT", reconciliationStatus: "UNMATCHED" },
@@ -785,7 +538,7 @@ export async function getReconciliation(session: Session) {
 
 export async function listDocuments(session: Session) {
   const rows = await prisma.document.findMany({
-    where: companyScope(session),
+    where: organizationScope(session),
     include: { property: true },
     orderBy: { createdAt: "desc" },
   });
@@ -799,8 +552,8 @@ export async function listDocuments(session: Session) {
 }
 
 export async function getReports(session: Session, basis: "month" | "tax" | "financial") {
-  const company = await prisma.company.findFirstOrThrow({
-    where: { id: session.companyId, tenantId: session.tenantId },
+  const company = await prisma.organization.findFirstOrThrow({
+    where: { id: session.organizationId, tenantId: session.tenantId },
   });
   const today = todayIso();
   const period =
@@ -809,7 +562,7 @@ export async function getReports(session: Session, basis: "month" | "tax" | "fin
       : basis === "financial"
         ? companyFinancialYearContaining(today, company.financialYearStartMonth, company.financialYearStartDay)
         : calendarMonthContaining(today);
-  const lines = await loadLines(session, period);
+  const lines = await loadLedgerLines(session, period);
   const statement = buildProfitAndLoss(lines, period);
   const bookings = await prisma.booking.findMany({ where: { ...scopeWhere(session), checkInDate: periodDates(period) } });
   const channels = revenueByChannel(
@@ -819,9 +572,9 @@ export async function getReports(session: Session, basis: "month" | "tax" | "fin
       platformCostsPence: toPence(booking.platformCommission) + toPence(booking.paymentProcessingFee),
     })),
   );
-  const properties = await prisma.property.findMany({ where: companyScope(session) });
+  const properties = await prisma.property.findMany({ where: organizationScope(session) });
   const accounts = await prisma.bankAccount.findMany({
-    where: companyScope(session),
+    where: organizationScope(session),
     include: { transactions: true },
   });
   let opening = 0;
@@ -857,16 +610,16 @@ export async function getReports(session: Session, basis: "month" | "tax" | "fin
 }
 
 function scopeWhere(session: Session) {
-  return companyScope(session);
+  return organizationScope(session);
 }
 
 export async function getTax(session: Session) {
   const today = todayIso();
-  const company = await prisma.company.findFirstOrThrow({ where: { id: session.companyId, tenantId: session.tenantId } });
-  const settings = await prisma.taxSetting.findMany({ where: companyScope(session), orderBy: { effectiveFrom: "desc" } });
-  const rates = await prisma.vatRate.findMany({ where: companyScope(session), orderBy: { effectiveFrom: "desc" } });
+  const company = await prisma.organization.findFirstOrThrow({ where: { id: session.organizationId, tenantId: session.tenantId } });
+  const settings = await prisma.taxSetting.findMany({ where: organizationScope(session), orderBy: { effectiveFrom: "desc" } });
+  const rates = await prisma.vatRate.findMany({ where: organizationScope(session), orderBy: { effectiveFrom: "desc" } });
   const rollingPeriod: DatePeriod = { start: addDays(today, -365), endExclusive: addDays(today, 1), label: "Rolling 12 months" };
-  const lines = await loadLines(session, rollingPeriod);
+  const lines = await loadLedgerLines(session, rollingPeriod);
   const statement = buildProfitAndLoss(lines, rollingPeriod);
   const configs = settings.map((setting) => ({
     id: setting.id,
@@ -898,10 +651,23 @@ export async function getTax(session: Session) {
 }
 
 export async function getSettings(session: Session) {
-  const company = await prisma.company.findFirstOrThrow({ where: { id: session.companyId, tenantId: session.tenantId } });
-  const users = await prisma.user.findMany({ where: companyScope(session), orderBy: { name: "asc" } });
+  const company = await prisma.organization.findFirstOrThrow({ where: { id: session.organizationId, tenantId: session.tenantId } });
+  const memberships = await prisma.organizationMembership.findMany({
+    where: { organizationId: session.organizationId },
+    include: { user: true },
+    orderBy: { user: { name: "asc" } },
+  });
+  const invites = await prisma.invitation.findMany({
+    where: {
+      ...organizationScope(session),
+      acceptedAt: null,
+      revokedAt: null,
+      expiresAt: { gt: new Date() },
+    },
+    orderBy: { createdAt: "desc" },
+  });
   const audit = await prisma.auditLog.findMany({
-    where: companyScope(session),
+    where: organizationScope(session),
     orderBy: { createdAt: "desc" },
     take: 12,
   });
@@ -922,8 +688,21 @@ export async function getSettings(session: Session) {
     retentionYears: company.documentRetentionYears,
     yearStartMonth: company.financialYearStartMonth,
     yearStartDay: company.financialYearStartDay,
-    users: users.map((user) => ({ name: user.name, email: user.email, role: user.role })),
+    users: memberships.map((membership) => ({
+      id: membership.user.id,
+      name: membership.user.name,
+      email: membership.user.email,
+      role: membership.role,
+      isActive: membership.status === "ACTIVE",
+    })),
+    invites: invites.map((invite) => ({
+      id: invite.id,
+      email: invite.email,
+      role: invite.role,
+      expiresLabel: formatDisplayDate(dateToIso(invite.expiresAt)),
+    })),
     audit: audit.map((entry) => ({
+      id: entry.id,
       when: new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }).format(entry.createdAt),
       actor: entry.actorName,
       summary: entry.summary,
@@ -933,7 +712,7 @@ export async function getSettings(session: Session) {
 
 export async function searchLedger(session: Session, query: string) {
   const term = query.trim();
-  const scope = companyScope(session);
+  const scope = organizationScope(session);
   const contains = { contains: term, mode: "insensitive" as const };
   const [suppliers, customers, properties, invoices, bookings, expenses, documents, payments] = await Promise.all([
     prisma.supplier.findMany({ where: { ...scope, name: contains }, take: 10 }),
@@ -959,7 +738,7 @@ export async function searchLedger(session: Session, query: string) {
 
 export async function ageingSummary(session: Session) {
   const today = todayIso();
-  const invoices = await prisma.invoice.findMany({ where: companyScope(session), include: { payments: true } });
+  const invoices = await prisma.invoice.findMany({ where: organizationScope(session), include: { payments: true } });
   const buckets = { current: 0, days1to30: 0, days31to60: 0, days61plus: 0 };
   for (const invoice of invoices) {
     if (invoice.status === "VOID") {

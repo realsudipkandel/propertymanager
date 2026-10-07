@@ -1,7 +1,9 @@
+import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { Prisma, PrismaClient, type BookingPlatform } from "@prisma/client";
+import { config as loadEnv } from "dotenv";
 import bcrypt from "bcryptjs";
 
 import { calculateBookingFinancials } from "../src/domain/accounting";
@@ -9,6 +11,10 @@ import { accommodationIncomeCode, CATALOG, platformFeeCode } from "../src/domain
 import { INCOME_CODE } from "../src/domain/constants";
 import { addDays, todayIso } from "../src/domain/dates";
 import { encryptSecret, encryptionKeyFromHex } from "../src/domain/secrets";
+
+if (existsSync("secrets.env")) {
+  loadEnv({ path: "secrets.env" });
+}
 
 const prisma = new PrismaClient();
 
@@ -51,8 +57,10 @@ async function clearDatabase(): Promise<void> {
   await prisma.customer.deleteMany();
   await prisma.supplier.deleteMany();
   await prisma.property.deleteMany();
+  await prisma.invitation.deleteMany();
+  await prisma.organizationMembership.deleteMany();
   await prisma.user.deleteMany();
-  await prisma.company.deleteMany();
+  await prisma.organization.deleteMany();
   await prisma.tenant.deleteMany();
 }
 
@@ -72,11 +80,13 @@ async function main(): Promise<void> {
   const onDay = (day: number, monthOffset = 0) => utc(year, month + monthOffset, day);
 
   const tenant = await prisma.tenant.create({ data: { name: "Mira Properties" } });
-  const company = await prisma.company.create({
+  const company = await prisma.organization.create({
     data: {
       tenantId: tenant.id,
       legalName: "Mira Properties Ltd",
       tradingName: "Mira Properties",
+      slug: "mira-properties",
+      logoUrl: "/brand/mira-logo.png",
       companyNumber: "14588231",
       vatRegistered: false,
       addressLine1: "43 Foundry House",
@@ -91,13 +101,18 @@ async function main(): Promise<void> {
       documentRetentionYears: 7,
     },
   });
-  const scope = { tenantId: tenant.id, companyId: company.id };
+  const scope = { tenantId: tenant.id, organizationId: company.id };
   const user = await prisma.user.create({
     data: {
-      ...scope,
       email,
       name,
       passwordHash: await bcrypt.hash(password, 12),
+    },
+  });
+  await prisma.organizationMembership.create({
+    data: {
+      organizationId: company.id,
+      userId: user.id,
       role: "OWNER",
     },
   });

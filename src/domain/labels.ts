@@ -24,9 +24,12 @@ import {
 } from "@/domain/constants";
 
 export const ROLE_LABEL: Record<UserRole, string> = {
-  [USER_ROLE.OWNER]: "Owner / Director",
+  [USER_ROLE.OWNER]: "Owner",
+  [USER_ROLE.ORGANIZATION_ADMIN]: "Organisation admin",
+  [USER_ROLE.FINANCE_MANAGER]: "Finance manager",
   [USER_ROLE.ACCOUNTANT]: "Accountant",
   [USER_ROLE.PROPERTY_MANAGER]: "Property manager",
+  [USER_ROLE.OPERATIONS]: "Operations",
   [USER_ROLE.CLEANER]: "Cleaner",
   [USER_ROLE.VIEWER]: "Viewer",
 };

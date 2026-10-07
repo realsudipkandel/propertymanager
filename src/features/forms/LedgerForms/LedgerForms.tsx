@@ -17,7 +17,7 @@ function FieldError({ message }: { message?: string }) {
   return <p className="mt-1 text-xs text-pink-500">{message}</p>;
 }
 
-export function LoginForm({ email, password }: { email: string; password: string | null }) {
+export function LoginForm() {
   const [state, action] = useActionState(loginAction, idleFormState);
   return (
     <div className="mx-auto mt-10 w-full max-w-md px-4">
@@ -29,17 +29,10 @@ export function LoginForm({ email, password }: { email: string; password: string
         <BrandLogo className="mx-auto h-auto w-48" priority />
       </div>
       <h1 className="mt-6 text-3xl font-semibold">Sign in</h1>
-      <p className="mt-2 text-sm text-muted">The books for Riverview, Heathrow, and the company.</p>
-      {password ? (
-        <p className="mt-4 rounded-xl border border-line px-3 py-3 text-sm" data-testid="demo-login">
-          Development sign-in
-          <span className="mt-1 block text-muted">{email}</span>
-          <span className="block text-muted">{password}</span>
-        </p>
-      ) : null}
+      <p className="mt-2 text-sm text-muted">Sign in to an organisation you belong to.</p>
       <label className="mt-6 block text-sm">
         Email
-        <input className="glass-input mt-1" name="email" type="email" autoComplete="username" defaultValue={email} required />
+        <input className="glass-input mt-1" name="email" type="email" autoComplete="username" required />
       </label>
       <label className="mt-4 block text-sm">
         Password

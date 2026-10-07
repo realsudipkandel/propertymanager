@@ -25,14 +25,18 @@ import {
   ukTaxYearContaining,
 } from "@/domain/dates";
 import { revenueFromDeposit } from "@/domain/deposits";
-import { invalidForm } from "@/domain/form-state";
-import { extensionAllowed, resolveStoragePath } from "@/domain/files";
+import { invalidForm, inviteReady } from "@/domain/form-state";
+import { attachmentDisposition, contentTypeForStorageKey, extensionAllowed, resolveStoragePath } from "@/domain/files";
+import { LOGIN_ACCOUNT_FAILURE_LIMIT, LOGIN_WINDOW_MS, loginIsLimited } from "@/domain/login-limit";
 import { ageingBucket, applyPayment, invoiceCollectionStatus, outstandingBalance, supplierBillStatus } from "@/domain/invoices";
 import { calculatePropertyKpis } from "@/domain/kpis";
 import { PLATFORM_LABEL, countLabel } from "@/domain/labels";
 import { applyBasisPoints, formatGbp, formatMargin, marginBasisPoints, parsePoundsToPence } from "@/domain/money";
-import { navForRole } from "@/domain/navigation";
-import { canConfigureBank, canManageSettings, canMutateFinance, canPostExpense, canUploadReceipt, canViewFinance, canViewOperations, canViewTax } from "@/domain/permissions";
+import { inviteExpiresAt, inviteIsOpen, isUserRole, memberCreateErrors, membershipChangeBlock, normaliseEmail } from "@/domain/membership";
+import { canAccessPath, homeForRole, navForRole } from "@/domain/navigation";
+import { organizationPath, pathWithinOrganization, sameOrganization, slugFromName } from "@/domain/organization";
+import { canConfigureBank, canCreateOrganization, canManageSettings, canMutateFinance, canPostExpense, canUploadReceipt, canViewFinance, canViewOperations, canViewTax } from "@/domain/permissions";
+import { propertyCreateErrors } from "@/domain/property";
 import { isExactAllocation, suggestUniqueAmountMatch } from "@/domain/reconciliation";
 import { buildProfitAndLoss, linesForProperty, revenueByChannel, summariseCash, type LedgerLine } from "@/domain/reports";
 import { decryptSecret, encryptSecret, encryptionKeyFromHex, maskAccountNumber } from "@/domain/secrets";
@@ -534,10 +538,17 @@ describe("periods, money, files, and access", () => {
     expect(resolveStoragePath("/data", "/etc/passwd")).toBeNull();
     expect(extensionAllowed("receipt.HEIC", ["pdf", "jpg", "jpeg", "png", "heic"])).toBe(true);
     expect(extensionAllowed("receipt.exe", ["pdf", "jpg"])).toBe(false);
+    expect(contentTypeForStorageKey("org/file.pdf")).toBe("application/pdf");
+    expect(contentTypeForStorageKey("org/file.exe")).toBeNull();
+    expect(attachmentDisposition('invoice\r\n.pdf"')).toBe('attachment; filename="invoice_.pdf_"');
+    expect(attachmentDisposition("")).toBe('attachment; filename="download"');
+    const attempts = Array.from({ length: LOGIN_ACCOUNT_FAILURE_LIMIT }, () => 1_000);
+    expect(loginIsLimited(attempts, 1_000, LOGIN_ACCOUNT_FAILURE_LIMIT)).toBe(true);
+    expect(loginIsLimited(attempts, 1_000 + LOGIN_WINDOW_MS, LOGIN_ACCOUNT_FAILURE_LIMIT)).toBe(false);
   });
 
   it("round-trips encrypted bank details and masks them", () => {
-    const key = encryptionKeyFromHex("42e6c9b5e0cb62e8293b71f3746c99bffe82a96fcf19c756f686f07dd17ac591");
+    const key = encryptionKeyFromHex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
     const cipher = encryptSecret("12345678", key);
     expect(cipher).not.toContain("12345678");
     expect(decryptSecret(cipher, key)).toBe("12345678");
@@ -571,7 +582,140 @@ describe("periods, money, files, and access", () => {
     expect(isColorTheme(COLOR_THEME.DARK)).toBe(true);
     expect(isColorTheme("system")).toBe(false);
     expect(navForRole(USER_ROLE.OWNER).some((item) => item.href === "/tax")).toBe(true);
+    expect(navForRole(USER_ROLE.OWNER).some((item) => item.href === "/team")).toBe(true);
+    expect(canAccessPath(USER_ROLE.ACCOUNTANT, "/org/london-stay-ltd/team")).toBe(true);
     expect(navForRole(USER_ROLE.CLEANER).some((item) => item.href === "/tax")).toBe(false);
+    expect(canAccessPath(USER_ROLE.CLEANER, "/org/mira-properties/tax")).toBe(false);
+    expect(organizationPath("mira-properties", "/bookings")).toBe("/org/mira-properties/bookings");
+    expect(pathWithinOrganization("/org/mira-properties/expenses/new")).toBe("/expenses/new");
+    expect(pathWithinOrganization("/org/mira-properties")).toBe("/");
+    expect(slugFromName("London Stay Ltd")).toBe("london-stay-ltd");
+    expect(sameOrganization("org-a", "org-a")).toBe(true);
+    expect(sameOrganization("org-a", "org-b")).toBe(false);
+    expect(canManageSettings(USER_ROLE.ORGANIZATION_ADMIN)).toBe(true);
+    expect(canCreateOrganization(USER_ROLE.OWNER)).toBe(true);
+    expect(canCreateOrganization(USER_ROLE.ORGANIZATION_ADMIN)).toBe(true);
+    expect(canCreateOrganization(USER_ROLE.FINANCE_MANAGER)).toBe(false);
+    expect(canCreateOrganization(USER_ROLE.ACCOUNTANT)).toBe(false);
+    expect(canCreateOrganization(USER_ROLE.PROPERTY_MANAGER)).toBe(false);
+    expect(canCreateOrganization(USER_ROLE.OPERATIONS)).toBe(false);
+    expect(canCreateOrganization(USER_ROLE.CLEANER)).toBe(false);
+    expect(canCreateOrganization(USER_ROLE.VIEWER)).toBe(false);
+    expect(propertyCreateErrors({
+      name: "Canal House",
+      address: "12 Canal Street",
+      city: "London",
+      postcode: "SW1A 1AA",
+      bedroomsRaw: "2",
+    })).toEqual({});
+    expect(propertyCreateErrors({
+      name: "",
+      address: "",
+      city: "",
+      postcode: "SW1",
+      bedroomsRaw: "31",
+    }).bedrooms).toBe("Enter 0 to 30 bedrooms.");
+    expect(propertyCreateErrors({
+      name: "Canal House",
+      address: "12 Canal Street",
+      city: "London",
+      postcode: "SW1A 1AA",
+      bedroomsRaw: "",
+    }).bedrooms).toBe("Enter the number of bedrooms.");
+    expect(canViewTax(USER_ROLE.FINANCE_MANAGER)).toBe(true);
+    expect(canMutateFinance(USER_ROLE.OPERATIONS)).toBe(true);
+    expect(canAccessPath(USER_ROLE.CLEANER, "/expenses/new")).toBe(true);
+    expect(canAccessPath(USER_ROLE.VIEWER, "/banking")).toBe(true);
+    expect(canAccessPath(USER_ROLE.PROPERTY_MANAGER, "/banking")).toBe(false);
+    expect(canAccessPath(USER_ROLE.OWNER, "/search")).toBe(true);
+    expect(homeForRole(USER_ROLE.CLEANER)).toBe("/expenses");
+    expect(homeForRole(USER_ROLE.OWNER)).toBe("/");
+    expect(normaliseEmail("  Director@MiraProperties.Example ")).toBe("director@miraproperties.example");
+    expect(normaliseEmail("not-an-email")).toBeNull();
+    expect(normaliseEmail("a@b")).toBeNull();
+    expect(normaliseEmail("a@@b.com")).toBeNull();
+    expect(memberCreateErrors({
+      name: "Pat",
+      email: "pat@example.com",
+      role: USER_ROLE.OPERATIONS,
+      password: "Operations-pass1",
+      confirmPassword: "Operations-pass1",
+      accountExists: false,
+    })).toEqual({});
+    expect(memberCreateErrors({
+      name: "",
+      email: null,
+      role: "nope",
+      password: "short",
+      confirmPassword: "other",
+      accountExists: false,
+    }).name).toBe("Enter their name.");
+    expect(memberCreateErrors({
+      name: "",
+      email: "pat@example.com",
+      role: USER_ROLE.ACCOUNTANT,
+      password: "",
+      confirmPassword: "",
+      accountExists: true,
+    })).toEqual({});
+    expect(isUserRole(USER_ROLE.OWNER)).toBe(true);
+    expect(isUserRole("guest")).toBe(false);
+    expect(inviteReady("https://localhost/invite/token").inviteUrl).toBe("https://localhost/invite/token");
+    expect(canAccessPath(USER_ROLE.OWNER, "/missing")).toBe(false);
+    expect(inviteIsOpen({
+      expiresAt: new Date("2026-10-04T00:00:00.000Z"),
+      acceptedAt: null,
+      revokedAt: null,
+      now: new Date("2026-09-27T00:00:00.000Z"),
+    })).toBe(true);
+    expect(inviteIsOpen({
+      expiresAt: new Date("2026-09-01T00:00:00.000Z"),
+      acceptedAt: null,
+      revokedAt: null,
+      now: new Date("2026-09-27T00:00:00.000Z"),
+    })).toBe(false);
+    const openUntil = inviteExpiresAt(new Date("2026-09-27T00:00:00.000Z"));
+    expect(openUntil.toISOString()).toBe("2026-10-04T00:00:00.000Z");
+    expect(membershipChangeBlock({
+      actorUserId: "owner-1",
+      targetUserId: "owner-1",
+      nextActive: true,
+      nextRole: USER_ROLE.ACCOUNTANT,
+      activeOwnerIds: ["owner-1"],
+    })).toBe("OWN_ACCESS");
+    expect(membershipChangeBlock({
+      actorUserId: "owner-1",
+      targetUserId: "owner-2",
+      nextActive: false,
+      nextRole: USER_ROLE.OWNER,
+      activeOwnerIds: ["owner-2"],
+    })).toBe("LAST_OWNER");
+    expect(membershipChangeBlock({
+      actorUserId: "owner-1",
+      targetUserId: "owner-2",
+      nextActive: true,
+      nextRole: USER_ROLE.VIEWER,
+      activeOwnerIds: ["owner-2"],
+    })).toBe("LAST_OWNER");
+    expect(inviteIsOpen({
+      expiresAt: new Date("2026-10-04T00:00:00.000Z"),
+      acceptedAt: new Date("2026-09-28T00:00:00.000Z"),
+      revokedAt: null,
+      now: new Date("2026-09-27T00:00:00.000Z"),
+    })).toBe(false);
+    expect(inviteIsOpen({
+      expiresAt: new Date("2026-10-04T00:00:00.000Z"),
+      acceptedAt: null,
+      revokedAt: new Date("2026-09-28T00:00:00.000Z"),
+      now: new Date("2026-09-27T00:00:00.000Z"),
+    })).toBe(false);
+    expect(membershipChangeBlock({
+      actorUserId: "owner-1",
+      targetUserId: "accountant-1",
+      nextActive: true,
+      nextRole: USER_ROLE.VIEWER,
+      activeOwnerIds: ["owner-1", "owner-2"],
+    })).toBeNull();
     expect(accommodationIncomeCode(BOOKING_PLATFORM.AIRBNB)).toBe("AIRBNB_BOOKING");
     expect(platformFeeCode(BOOKING_PLATFORM.BOOKING_COM)).toBe("BOOKING_COM_COMMISSION");
     expect(platformFeeCode(BOOKING_PLATFORM.DIRECT_WEBSITE)).toBe("PAYMENT_PROCESSING");
