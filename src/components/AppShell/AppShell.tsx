@@ -6,6 +6,7 @@ import {
   Coins,
   FileText,
   FolderOpen,
+  Globe,
   Home,
   Landmark,
   LayoutDashboard,
@@ -30,6 +31,7 @@ import { logoutAction } from "@/server/mutations";
 
 const ICONS: Record<string, LucideIcon> = {
   layout: LayoutDashboard,
+  globe: Globe,
   calendar: CalendarRange,
   trending: TrendingUp,
   receipt: Receipt,

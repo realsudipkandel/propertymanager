@@ -7,6 +7,8 @@ import { config as loadEnv } from "dotenv";
 import bcrypt from "bcryptjs";
 
 import { calculateBookingFinancials } from "../src/domain/accounting";
+import { capabilitiesForProvider } from "../src/domain/channels/capabilities";
+import { nightsOccupied } from "../src/domain/channels/reservation";
 import { accommodationIncomeCode, CATALOG, platformFeeCode } from "../src/domain/catalog";
 import { INCOME_CODE } from "../src/domain/constants";
 import { addDays, todayIso } from "../src/domain/dates";
@@ -56,6 +58,12 @@ async function clearDatabase(): Promise<void> {
   await prisma.bankAccount.deleteMany();
   await prisma.customer.deleteMany();
   await prisma.supplier.deleteMany();
+  await prisma.reservationNightLock.deleteMany();
+  await prisma.syncEvent.deleteMany();
+  await prisma.reservation.deleteMany();
+  await prisma.listingMapping.deleteMany();
+  await prisma.dailyRate.deleteMany();
+  await prisma.channelAccount.deleteMany();
   await prisma.property.deleteMany();
   await prisma.invitation.deleteMany();
   await prisma.organizationMembership.deleteMany();
@@ -871,6 +879,109 @@ async function main(): Promise<void> {
       notes: "Capital item. Not charged to operating profit.",
     },
   });
+  const directAccount = await prisma.channelAccount.create({
+    data: {
+      ...scope,
+      provider: "DIRECT",
+      displayName: "Mira Direct",
+      status: "ACTIVE",
+      capabilities: capabilitiesForProvider("DIRECT"),
+      lastSyncAt: now,
+    },
+  });
+  const airbnbAccount = await prisma.channelAccount.create({
+    data: {
+      ...scope,
+      provider: "MOCK_AIRBNB",
+      displayName: "Mira Properties main account",
+      status: "ACTIVE",
+      capabilities: capabilitiesForProvider("MOCK_AIRBNB"),
+      lastSyncAt: now,
+    },
+  });
+  await prisma.listingMapping.create({
+    data: {
+      ...scope,
+      channelAccountId: airbnbAccount.id,
+      propertyId: riverview.id,
+      externalListingId: "MOCK_AIRBNB-demo-1",
+      syncMode: "ARI_ONLY",
+      markupBps: 1_500,
+    },
+  });
+  await prisma.listingMapping.create({
+    data: {
+      ...scope,
+      channelAccountId: directAccount.id,
+      propertyId: riverview.id,
+      externalListingId: "DIRECT-riverview",
+      syncMode: "FULL_SYNC",
+      markupBps: -500,
+    },
+  });
+  for (let offset = 0; offset < 14; offset += 1) {
+    const date = new Date(now);
+    date.setUTCDate(date.getUTCDate() + offset);
+    date.setUTCHours(0, 0, 0, 0);
+    await prisma.dailyRate.create({
+      data: {
+        ...scope,
+        propertyId: riverview.id,
+        date,
+        basePricePence: 12_000,
+        minStay: 2,
+      },
+    });
+  }
+  const seedCheckIn = addDays(today, 5);
+  const seedCheckOut = addDays(seedCheckIn, 3);
+  const seedNights = nightsOccupied(seedCheckIn, seedCheckOut);
+  const seedAccommodationPence = 27_000;
+  const seedCleaningPence = 5_500;
+  const seedCommissionPence = Math.round(seedAccommodationPence * 0.15);
+  const seedReservation = await prisma.reservation.create({
+    data: {
+      ...scope,
+      propertyId: riverview.id,
+      channelAccountId: airbnbAccount.id,
+      provider: "MOCK_AIRBNB",
+      externalReservationId: "SEED-RES-1",
+      status: "CONFIRMED",
+      guestName: "Priya Nair",
+      guestEmail: "priya.nair@example.com",
+      checkInDate: new Date(`${seedCheckIn}T00:00:00.000Z`),
+      checkOutDate: new Date(`${seedCheckOut}T00:00:00.000Z`),
+      nights: seedNights.length,
+      guests: 2,
+      accommodationPence: seedAccommodationPence,
+      cleaningPence: seedCleaningPence,
+      otherPence: 0,
+      grossPence: seedAccommodationPence + seedCleaningPence,
+      commissionPence: seedCommissionPence,
+      currency: "GBP",
+    },
+  });
+  await prisma.reservationNightLock.createMany({
+    data: seedNights.map((date) => ({
+      organizationId: company.id,
+      propertyId: riverview.id,
+      date: new Date(`${date}T00:00:00.000Z`),
+      reservationId: seedReservation.id,
+    })),
+  });
+  await prisma.syncEvent.create({
+    data: {
+      tenantId: tenant.id,
+      organizationId: company.id,
+      channelAccountId: airbnbAccount.id,
+      provider: "MOCK_AIRBNB",
+      externalEventId: "SEED-RES-1-EVT-1",
+      eventType: "RESERVATION_CREATED",
+      payload: { seeded: true, externalReservationId: "SEED-RES-1" },
+      processedAt: now,
+    },
+  });
+
   await prisma.auditLog.create({
     data: {
       ...scope,
