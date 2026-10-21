@@ -192,6 +192,184 @@ enum CategoryGroup {
   EXPENSE
 }
 
+// --- Channel management (distribution / connectivity layer) ---
+//
+// Mira is the canonical source of truth for property, rate, availability and
+// reservation data. Every OTA/channel is an adapter around this core — see
+// src/domain/channels. These tables deliberately stay separate from the
+// existing accounting Booking model: a Reservation is the *operational*
+// source event raised by (or sent to) a channel; it is converted into the
+// financial Booking/Income/Expense records once confirmed.
+
+enum ChannelProvider {
+  DIRECT
+  MOCK_AIRBNB
+  MOCK_BOOKING_COM
+  MOCK_VRBO
+}
+
+enum ChannelConnectionStatus {
+  AUTHORIZING
+  MAPPING_REQUIRED
+  ACTIVE
+  DEGRADED
+  ACTION_REQUIRED
+  DISCONNECTED
+}
+
+enum ChannelSyncMode {
+  FULL_SYNC
+  ARI_ONLY
+  RESERVATIONS_ONLY
+}
+
+enum ReservationStatus {
+  INQUIRY
+  CONFIRMED
+  MODIFIED
+  CANCELLED
+  CHECKED_IN
+  CHECKED_OUT
+}
+
+model ChannelAccount {
+  id             String                  @id @default(uuid())
+  tenantId       String
+  organizationId String
+  organization   Organization            @relation(fields: [organizationId], references: [id])
+  provider       ChannelProvider
+  displayName    String
+  status         ChannelConnectionStatus @default(AUTHORIZING)
+  capabilities   Json
+  credentialReference String?
+  lastSyncAt     DateTime?
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  mappings     ListingMapping[]
+  reservations Reservation[]
+  syncEvents   SyncEvent[]
+
+  @@index([tenantId, organizationId])
+  @@map("channel_accounts")
+}
+
+model ListingMapping {
+  id               String          @id @default(uuid())
+  tenantId         String
+  organizationId   String
+  organization     Organization    @relation(fields: [organizationId], references: [id])
+  channelAccountId String
+  channelAccount   ChannelAccount  @relation(fields: [channelAccountId], references: [id])
+  propertyId       String
+  property         Property        @relation(fields: [propertyId], references: [id])
+  externalListingId String
+  syncMode         ChannelSyncMode @default(ARI_ONLY)
+  markupBps        Int             @default(0)
+  isActive         Boolean         @default(true)
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  @@unique([channelAccountId, externalListingId])
+  @@index([tenantId, organizationId, propertyId])
+  @@map("listing_mappings")
+}
+
+model DailyRate {
+  id             String   @id @default(uuid())
+  tenantId       String
+  organizationId String
+  propertyId     String
+  property       Property @relation(fields: [propertyId], references: [id])
+  date           DateTime @db.Date
+  basePricePence Int
+  minStay        Int      @default(1)
+  stopSell       Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([propertyId, date])
+  @@index([tenantId, organizationId])
+  @@map("daily_rates")
+}
+
+model Reservation {
+  id                 String             @id @default(uuid())
+  tenantId           String
+  organizationId     String
+  organization       Organization       @relation(fields: [organizationId], references: [id])
+  propertyId         String
+  property           Property           @relation(fields: [propertyId], references: [id])
+  channelAccountId   String
+  channelAccount     ChannelAccount     @relation(fields: [channelAccountId], references: [id])
+  provider           ChannelProvider
+  externalReservationId String
+  status             ReservationStatus  @default(CONFIRMED)
+  guestName          String
+  guestEmail         String?
+  checkInDate        DateTime           @db.Date
+  checkOutDate       DateTime           @db.Date
+  nights             Int
+  guests             Int
+  accommodationPence Int
+  cleaningPence      Int                @default(0)
+  otherPence         Int                @default(0)
+  grossPence         Int
+  commissionPence    Int                @default(0)
+  currency           String             @default("GBP")
+  bookingId          String?
+  cancelledAt        DateTime?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  nightLocks ReservationNightLock[]
+
+  @@unique([organizationId, provider, externalReservationId])
+  @@index([tenantId, organizationId, propertyId])
+  @@map("reservations")
+}
+
+// One row per occupied night per property. The unique constraint on
+// (propertyId, date) is the double-booking guard described in the PRD:
+// reserving a stay inserts one lock row per night inside a single
+// transaction, so a second, overlapping reservation collides on the unique
+// index and the whole transaction rolls back atomically instead of silently
+// creating two confirmed reservations for the same night.
+model ReservationNightLock {
+  id            String      @id @default(uuid())
+  organizationId String
+  propertyId    String
+  date          DateTime    @db.Date
+  reservationId String
+  reservation   Reservation @relation(fields: [reservationId], references: [id])
+
+  @@unique([propertyId, date])
+  @@index([organizationId])
+  @@map("reservation_night_locks")
+}
+
+// Raw inbound event store, keyed for idempotency by (organization, provider,
+// externalEventId). A provider resending the same webhook four times must
+// still produce one processed outcome.
+model SyncEvent {
+  id               String         @id @default(uuid())
+  tenantId         String
+  organizationId   String
+  channelAccountId String
+  channelAccount   ChannelAccount @relation(fields: [channelAccountId], references: [id])
+  provider         ChannelProvider
+  externalEventId  String
+  eventType        String
+  payload          Json
+  processedAt      DateTime?
+  conflict         Boolean        @default(false)
+  createdAt        DateTime       @default(now())
+
+  @@unique([organizationId, provider, externalEventId])
+  @@index([tenantId, organizationId, createdAt])
+  @@map("sync_events")
+}
+
 model Tenant {
   id        String    @id @default(uuid())
   name      String
@@ -254,6 +432,9 @@ model Organization {
   notifications      Notification[]
   auditLogs          AuditLog[]
   assets             Asset[]
+  channelAccounts    ChannelAccount[]
+  listingMappings    ListingMapping[]
+  reservations       Reservation[]
 
   @@index([tenantId])
   @@map("organizations")
@@ -331,6 +512,9 @@ model Property {
   assets     Asset[]
   deposits   Deposit[]
   refunds    Refund[]
+  listingMappings ListingMapping[]
+  dailyRates      DailyRate[]
+  reservations    Reservation[]
 
   @@index([tenantId, organizationId])
   @@map("properties")

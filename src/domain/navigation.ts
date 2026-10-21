@@ -37,6 +37,7 @@ const OPERATIONS: readonly UserRole[] = [
 
 export const NAV_ITEMS: readonly NavItem[] = [
   { href: "/", label: "Dashboard", icon: "layout", roles: ALL_ROLES },
+  { href: "/channels", label: "Channels", icon: "globe", roles: OPERATIONS },
   { href: "/bookings", label: "Bookings", icon: "calendar", roles: OPERATIONS },
   { href: "/income", label: "Income", icon: "trending", roles: FINANCE },
   { href: "/expenses", label: "Expenses", icon: "receipt", roles: [...FINANCE, USER_ROLE.PROPERTY_MANAGER, USER_ROLE.CLEANER] },
